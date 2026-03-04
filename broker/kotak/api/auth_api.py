@@ -5,6 +5,7 @@ import httpx
 
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
+from utils.get_totp import generate_totp
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -37,10 +38,11 @@ def authenticate_broker(mobile_number, totp, mpin):
         logger.info("Starting Kotak TOTP authentication flow")
 
         # Get UCC from BROKER_API_KEY and access_token from BROKER_API_SECRET
-        from utils.config import get_broker_api_key, get_broker_api_secret
+        from utils.config import get_broker_api_key, get_broker_api_secret, get_broker_totp_secret, get_broker_issuer
 
         ucc = get_broker_api_key()
         access_token = get_broker_api_secret()
+  
 
         if not ucc:
             logger.error("BROKER_API_KEY (UCC) is not configured")
@@ -64,9 +66,17 @@ def authenticate_broker(mobile_number, totp, mpin):
 
         # Get the shared httpx client with connection pooling
         client = get_httpx_client()
-
+        totp_secret = get_broker_totp_secret()
+        issuer = get_broker_issuer()
+        
+        if not totp_secret or not issuer:
+            totp_code = totp
+        else:
+            logger.info(totp_secret, issuer)
+            totp_code = generate_totp(totp_secret, issuer)
+        
         # Step 1: Login with TOTP
-        payload = json.dumps({"mobileNumber": mobile_number, "ucc": ucc, "totp": totp})
+        payload = json.dumps({"mobileNumber": mobile_number, "ucc": ucc, "totp": totp_code})
 
         headers = {
             "Authorization": access_token,
