@@ -4,7 +4,7 @@ import os
 import httpx
 
 from utils.httpx_client import get_httpx_client
-
+from utils.get_totp import generate_totp
 
 def authenticate_broker(clientcode, broker_pin, totp_code):
     """
@@ -15,6 +15,14 @@ def authenticate_broker(clientcode, broker_pin, totp_code):
     try:
         # Get the shared httpx client
         client = get_httpx_client()
+
+        totp_secret = os.getenv("BROKER_TOTP_SECRET")
+        issuer = os.getenv("BROKER_ISSUER")
+
+        if not totp_secret or not issuer:
+            totp_code = totp_code
+        else:
+            totp_code = generate_totp(totp_secret, issuer)
 
         payload = json.dumps({"clientcode": clientcode, "password": broker_pin, "totp": totp_code})
         headers = {

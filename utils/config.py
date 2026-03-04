@@ -56,3 +56,9 @@ def get_host_server() -> str:
         str: The host server URL string.
     """
     return os.getenv("HOST_SERVER", "http://127.0.0.1:5000")
+
+def get_broker_totp_secret():
+    return os.getenv("BROKER_TOTP_SECRET")
+
+def get_broker_issuer():
+    return os.getenv("BROKER_ISSUER")
