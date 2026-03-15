@@ -19,10 +19,8 @@ def authenticate_broker(clientcode, broker_pin, totp_code):
         totp_secret = os.getenv("BROKER_TOTP_SECRET")
         issuer = os.getenv("BROKER_ISSUER")
 
-        if not totp_secret or not issuer:
-            totp_code = totp_code
-        else:
-            totp_code = generate_totp(totp_secret, issuer)
+
+        totp_code = generate_totp(totp_secret)
 
         payload = json.dumps({"clientcode": clientcode, "password": broker_pin, "totp": totp_code})
         headers = {
