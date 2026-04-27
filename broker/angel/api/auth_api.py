@@ -5,22 +5,33 @@ import httpx
 
 from utils.httpx_client import get_httpx_client
 from utils.get_totp import generate_totp
+from utils.config import get_broker_totp_secret, get_broker_issuer
+from utils.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 def authenticate_broker(clientcode, broker_pin, totp_code):
     """
-    Authenticate with the broker and return the auth token.
+    Authenticate with Angel One and return the auth token.
+
+    If BROKER_TOTP_SECRET is configured in .env, TOTP is auto-generated
+    (the totp_code argument from the form is ignored).
+    Otherwise falls back to the totp_code passed in from the form.
     """
     api_key = os.getenv("BROKER_API_KEY")
 
     try:
-        # Get the shared httpx client
         client = get_httpx_client()
 
-        totp_secret = os.getenv("BROKER_TOTP_SECRET")
-        issuer = os.getenv("BROKER_ISSUER")
+        totp_secret = get_broker_totp_secret()
+        issuer = get_broker_issuer()
 
-
-        totp_code = generate_totp(totp_secret)
+        if totp_secret:
+            totp_code = generate_totp(totp_secret, issuer)
+            logger.info("Angel One: TOTP auto-generated from BROKER_TOTP_SECRET")
+        else:
+            logger.info("Angel One: using TOTP from form input (BROKER_TOTP_SECRET not set)")
 
         payload = json.dumps({"clientcode": clientcode, "password": broker_pin, "totp": totp_code})
         headers = {
@@ -28,7 +39,7 @@ def authenticate_broker(clientcode, broker_pin, totp_code):
             "Accept": "application/json",
             "X-UserType": "USER",
             "X-SourceID": "WEB",
-            "X-ClientLocalIP": "CLIENT_LOCAL_IP",  # Ensure these are handled or replaced appropriately
+            "X-ClientLocalIP": "CLIENT_LOCAL_IP",
             "X-ClientPublicIP": "CLIENT_PUBLIC_IP",
             "X-MACAddress": "MAC_ADDRESS",
             "X-PrivateKey": api_key,
@@ -46,12 +57,18 @@ def authenticate_broker(clientcode, broker_pin, totp_code):
         data = response.text
         data_dict = json.loads(data)
 
-        if "data" in data_dict and "jwtToken" in data_dict["data"]:
-            # Return both JWT token and feed token if available (None if not)
+        logger.debug(f"Angel One auth response: {data_dict.get('message', '')} status={response.status_code}")
+
+        if data_dict.get("data") and "jwtToken" in data_dict["data"]:
             auth_token = data_dict["data"]["jwtToken"]
             feed_token = data_dict["data"].get("feedToken", None)
+            logger.info("Angel One authentication successful")
             return auth_token, feed_token, None
         else:
-            return None, None, data_dict.get("message", "Authentication failed. Please try again.")
+            error_msg = data_dict.get("message", "Authentication failed. Please try again.")
+            logger.error(f"Angel One authentication failed: {error_msg}")
+            return None, None, error_msg
+
     except Exception as e:
+        logger.error(f"Angel One authentication error: {str(e)}")
         return None, None, str(e)

@@ -322,6 +322,19 @@ def get_option_chain(
                 {"status": "error", "message": f"Could not determine LTP for {quote_symbol}"},
                 500,
             )
+        # Fallback: if LTP is 0 (live tick not yet arrived) use prev_close or
+        # midpoint of high/low so ATM is computed correctly instead of defaulting
+        # to the lowest available strike.
+        if not underlying_ltp:
+            _high = underlying_data.get("high", 0) or 0
+            _low  = underlying_data.get("low",  0) or 0
+            _prev = underlying_prev_close or 0
+            underlying_ltp = (_high + _low) / 2 if _high and _low else _prev
+            if underlying_ltp:
+                logger.info(
+                    f"LTP=0 for {quote_symbol} — using fallback spot {underlying_ltp:.2f} "
+                    f"(high={_high}, low={_low}, prev_close={_prev})"
+                )
 
         logger.info(f"Underlying LTP: {underlying_ltp}, Prev Close: {underlying_prev_close}")
 
