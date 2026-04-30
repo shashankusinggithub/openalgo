@@ -72,7 +72,7 @@ def authenticate_broker(mobile_number, totp, mpin):
         if not totp_secret or not issuer:
             totp_code = totp
         else:
-            logger.info(totp_secret, issuer)
+            logger.debug("Generating Kotak TOTP from configured secret")
             totp_code = generate_totp(totp_secret, issuer)
         
         # Step 1: Login with TOTP
