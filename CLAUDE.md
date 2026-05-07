@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-OpenAlgo is a production-ready algorithmic trading platform built with Flask (backend) and React 19 (frontend). It provides a unified API layer across 24+ Indian brokers, enabling seamless integration with TradingView, Amibroker, Excel, Python, and AI agents.
+OpenAlgo is a production-ready algorithmic trading platform built with Flask (backend) and React 19 (frontend). It provides a unified API layer across 30+ Indian brokers, enabling seamless integration with TradingView, Amibroker, Excel, Python, and AI agents.
 
 **Repository**: https://github.com/marketcalls/openalgo
 **Documentation**: https://docs.openalgo.in
@@ -38,10 +38,10 @@ cp .sample.env .env
 # Generate new APP_KEY and API_KEY_PEPPER:
 uv run python -c "import secrets; print(secrets.token_hex(32))"
 
-# Build React frontend (required - not tracked in git)
-cd frontend && npm install && npm run build && cd ..
-
-# Run application (uv automatically handles virtual env and dependencies)
+# Run application (uv automatically handles virtual env and dependencies).
+# The React frontend dist is force-committed to `main` by CI, so a fresh
+# clone of main already has frontend/dist/ ready to serve. You only need
+# to install Node and build locally if you are actively editing React code.
 uv run app.py
 ```
 
@@ -99,7 +99,7 @@ npm run format
 - `app.py` - Main Flask application entry point
 - `blueprints/` - Flask route handlers (UI and webhooks)
 - `restx_api/` - REST API endpoints (`/api/v1/`)
-- `broker/` - Broker integrations (24+ brokers), each with `api/`, `database/`, `mapping/`, `streaming/`, `plugin.json`
+- `broker/` - Broker integrations (30+ brokers), each with `api/`, `database/`, `mapping/`, `streaming/`, `plugin.json`
 - `services/` - Business logic layer
 - `database/` - SQLAlchemy models and database utilities
 - `utils/` - Shared utilities and helpers
@@ -113,7 +113,7 @@ OpenAlgo uses **6 separate databases** for isolation:
 - `db/logs.db` - Traffic and API logs
 - `db/latency.db` - Latency monitoring data
 - `db/health.db` - Health monitoring data
-- `db/sandbox.db` - Analyzer/sandbox mode (isolated virtual trading)
+- `db/sandbox.db` - Analyzer/sandbox mode (isolated sandbox trading)
 - `db/historify.duckdb` - Historical market data (DuckDB)
 
 Each database has its own initialization function in `/database/`.
@@ -134,7 +134,7 @@ Broker API calls use `httpx` with HTTP/2 connection pooling (`utils/httpx_client
 
 ### Broker Integration Pattern
 
-All 24+ brokers follow a standardized structure in `broker/{broker_name}/`:
+All 30+ brokers follow a standardized structure in `broker/{broker_name}/`:
 
 1. `api/auth_api.py` - OAuth2 or API key based authentication
 2. `api/order_api.py` - Place, modify, cancel orders
@@ -238,8 +238,10 @@ Most testing is currently manual via:
 
 ### Building for Production
 
+You typically do **not** need to build the frontend yourself for production deploys — see the CI/CD section below. Build only when actively editing React code:
+
 ```bash
-# Build React frontend
+# Build React frontend (only needed if editing React code)
 cd frontend
 npm run build
 
@@ -249,19 +251,28 @@ npm run build
 
 ### Important: Frontend Build (CI/CD)
 
-**`frontend/dist/` is NOT tracked in git.** The CI/CD pipeline builds it automatically on each push.
+`frontend/dist/` is in `.gitignore` so local devs cannot accidentally commit half-built artifacts — but on `main` the directory **is tracked**. The CI workflow (`.github/workflows/ci.yml`, job `commit-dist`) runs after every successful push to `main` and force-commits the freshly-built dist back to the branch:
 
-For local development after cloning:
-```bash
-cd frontend
-npm install
-npm run build
+```yaml
+# Excerpt from .github/workflows/ci.yml
+- name: Commit and push dist
+  run: |
+    git add -f frontend/dist/
+    git diff --staged --quiet || git commit -m "chore: auto-build frontend dist [skip ci]"
+    git push
 ```
 
-This is required before running the application locally. The build artifacts are gitignored to:
-- Prevent merge conflicts on hash-named files
-- Keep the repository size smaller
-- Ensure fresh builds via CI/CD
+Practical implications:
+
+- **Production servers** (clients running OpenAlgo on Ubuntu/Docker/EC2) **do not need Node.js or npm.** A plain `git pull` from `main` already brings the latest UI artifacts. This is the canonical upgrade path documented at https://docs.openalgo.in/installation-guidelines/getting-started/upgrade.
+- **Backend-only local devs** (editing Python only, not React) also typically don't need to build — whatever CI committed last serves the UI fine.
+- **React developers** still need `cd frontend && npm install && npm run build` (or `npm run dev` for hot reload) to test their own changes locally, since the local `.gitignore` won't track their build output.
+- **Feature branches** that the CI hasn't built yet may have stale or missing `frontend/dist/`. Either build locally or rebase onto a recent `main`.
+
+Why gitignore + force-add rather than just tracking the dist normally:
+- Prevents merge conflicts on hash-named chunk files between contributors
+- Keeps PR diffs small and reviewable
+- Single canonical build per merged PR (CI's), no drift from contributor-local Node versions
 
 ## Key Architectural Concepts
 
@@ -290,9 +301,9 @@ Orders can flow through two modes:
 
 Approval workflow in `database/action_center_db.py` and `services/action_center_service.py`
 
-### Analyzer Mode (Paper Trading)
+### Analyzer Mode (Sandbox Trading)
 
-Separate database (`sandbox.db`) with ₹1 Crore virtual capital:
+Separate database (`sandbox.db`) with ₹1 Crore sandbox capital:
 - Realistic margin system with leverage
 - Auto square-off at exchange timings
 - Complete isolation from live trading
@@ -327,6 +338,52 @@ Critical variables to configure:
 - `WEBSOCKET_HOST` / `WEBSOCKET_PORT`: WebSocket server config
 - `MAX_SYMBOLS_PER_WEBSOCKET`: Symbol limit per connection
 - `FLASK_DEBUG`: Enable debug mode (development only)
+
+## Version Bumping
+
+There are **two independent versions** in this repo. Do not confuse them.
+
+### 1. Platform version (e.g. `2.0.0.6`)
+
+This is the OpenAlgo platform itself. Source of truth: `utils/version.py`. Bumping touches **two files** and regenerates the lockfile — **never** the requirements files.
+
+1. `utils/version.py` — `VERSION = "x.y.z.w"` (runtime source of truth, read by `get_version()`)
+2. `pyproject.toml` — `version = "x.y.z.w"` (line 4, package metadata)
+3. Run `uv sync` to regenerate `uv.lock` with the new version
+
+```bash
+# Example: bumping platform 2.0.0.6 → 2.0.0.7
+# 1. Edit utils/version.py     → VERSION = "2.0.0.7"
+# 2. Edit pyproject.toml line 4 → version = "2.0.0.7"
+# 3. Sync the lockfile
+uv sync
+
+# 4. Verify
+uv run python -c "from utils.version import get_version; print(get_version())"
+# → 2.0.0.7
+```
+
+The platform version surfaces in:
+- The UI footer / about page (via `get_version()`)
+- API responses that include version metadata
+- Docker image tags built by CI
+
+### 2. OpenAlgo Python SDK pin (e.g. `openalgo==1.0.49`)
+
+This is a **separate** client library published on PyPI ([`openalgo`](https://pypi.org/project/openalgo/)) that the platform uses internally. It has its own release cycle. Bumping the SDK pin touches the dependency lists, **not** `utils/version.py`:
+
+1. `pyproject.toml` — update `openalgo==X.Y.Z` in the `dependencies` list
+2. `requirements.txt` — update the `openalgo==X.Y.Z` line
+3. `requirements-nginx.txt` — update the `openalgo==X.Y.Z` line
+4. Run `uv sync` to regenerate `uv.lock`
+
+```bash
+# Example: bumping SDK 1.0.49 → 1.0.50
+# Edit the three files above, then:
+uv sync
+```
+
+**Rule of thumb:** if you are releasing OpenAlgo, bump #1. If a new SDK is on PyPI with a fix you need, bump #2. They are unrelated.
 
 ## Code Style and Conventions
 
@@ -364,7 +421,7 @@ API keys are generated at `/apikey` and hashed with pepper before storage.
 
 ### Symbol Format
 
-OpenAlgo uses a standardized symbol format across all 24+ brokers. Broker-specific symbols are mapped via `broker/*/mapping/` modules and stored in the `SymToken` table.
+OpenAlgo uses a standardized symbol format across all 30+ brokers. Broker-specific symbols are mapped via `broker/*/mapping/` modules and stored in the `SymToken` table.
 
 **Equity:** Just the base symbol — `INFY`, `SBIN`, `TATAMOTORS`
 
@@ -372,7 +429,7 @@ OpenAlgo uses a standardized symbol format across all 24+ brokers. Broker-specif
 
 **Options:** `[BaseSymbol][ExpiryDate][Strike][CE/PE]` — `NIFTY28MAR2420800CE`, `VEDL25APR24292.5CE`
 
-**Exchange codes:** `NSE` (equity), `BSE` (equity), `NFO` (NSE F&O), `BFO` (BSE F&O), `CDS` (NSE currency), `BCD` (BSE currency), `MCX` (commodity), `NCDEX` (commodity), `NSE_INDEX` (indices), `BSE_INDEX` (indices)
+**Exchange codes:** `NSE` (equity), `BSE` (equity), `NFO` (NSE F&O), `BFO` (BSE F&O), `CDS` (NSE currency), `BCD` (BSE currency), `MCX` (commodity), `NCDEX` (commodity), `NCO` (NSE commodities — Zerodha only), `NSE_INDEX` (indices), `BSE_INDEX` (indices), `GLOBAL_INDEX` (global indices — Zerodha only, quote-only; includes US30/JAPAN225/HANGSENG and `GIFTNIFTY` from NSE IFSC)
 
 **Order constants:**
 - **Product:** `CNC` (cash & carry / delivery), `NRML` (futures & options carry), `MIS` (intraday square-off)
@@ -465,7 +522,7 @@ All error logging uses `logger.exception()` (not `logger.error()` + manual trace
 ## Claude Code Instructions
 
 ### Frontend Build Process
-When building the React frontend locally:
-- Run `cd frontend && npm run build` (build only, no tests)
-- Tests are handled by CI/CD pipeline, not required for local builds
-- The `frontend/dist/` directory is gitignored and built by GitHub Actions
+- The React frontend dist is force-committed to `main` by CI (`commit-dist` job in `.github/workflows/ci.yml`). Production servers and backend-only contributors do NOT need Node.js or npm — a plain `git pull` from `main` already brings the latest UI.
+- When actively editing React code, run `cd frontend && npm install && npm run build` (build only, no tests). Tests run in CI; not required for local iteration.
+- The local `.gitignore` excludes `frontend/dist/` so contributors cannot accidentally commit their own build output — but CI uses `git add -f` to override the ignore on `main` only.
+- See the "Important: Frontend Build (CI/CD)" section above for the full picture.
