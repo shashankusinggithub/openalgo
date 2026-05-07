@@ -66,12 +66,15 @@ class WebSocketPathProxyMiddleware:
                     done.send(True)
                 except Exception:
                     pass
-            for obj in (downstream, upstream):
-                if obj is not None:
-                    try:
-                        obj.close()
-                    except Exception:
-                        pass
+            # Do not close the downstream Eventlet WebSocket explicitly here.
+            # WebSocketWSGI owns that socket and will close it when this handler
+            # returns; double-closing it makes Eventlet log noisy
+            # "socket shutdown error: [Errno 9] Bad file descriptor" messages.
+            if upstream is not None:
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
 
         try:
             upstream = websocket.create_connection(
