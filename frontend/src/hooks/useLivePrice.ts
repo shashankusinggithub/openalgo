@@ -224,14 +224,16 @@ export function useLivePrice<T extends PriceableItem>(
         dataSource = 'rest'
       }
 
-      // For closed positions (qty=0), preserve ALL REST API values including LTP
-      // This ensures P&L% calculation remains stable (realized values don't change)
+      // For closed positions (qty=0), preserve realized P&L/avg/qty but still
+      // refresh the LTP column. The previous behaviour froze LTP at the exit
+      // price, which made the Positions page look stale even though Socket.IO
+      // and the market-data WebSocket were healthy. Keeping P&L unchanged avoids
+      // recalculating realized P&L while giving users a live quote reference.
       if (qty === 0) {
         return {
           ...item,
-          // Keep item.ltp from REST API - don't update with live data
-          // This prevents P&L% from recalculating with changing LTP
-          _dataSource: 'rest',
+          ltp: currentLtp ?? item.ltp,
+          _dataSource: dataSource,
         } as T & { _dataSource: string }
       }
 

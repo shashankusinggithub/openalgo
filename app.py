@@ -116,6 +116,7 @@ from utils.socketio_error_handler import (
 )
 from utils.traffic_logger import init_traffic_logging  # Import traffic logging
 from utils.version import get_version  # Import version management
+from utils.ws_path_proxy import install_ws_path_proxy  # Public /ws bridge for Cloudflare Tunnel
 
 # Import WebSocket proxy server - using relative import to avoid @ symbol issues
 from websocket_proxy.app_integration import start_websocket_proxy
@@ -662,6 +663,8 @@ def setup_environment(app):
 
 
 app = create_app()
+if os.getenv("PUBLIC_WS_PATH_PROXY", "False").strip().strip("'\"").lower() in ("true", "1", "yes", "on"):
+    install_ws_path_proxy(app)
 
 # Explicitly call the setup environment function
 setup_environment(app)

@@ -61,6 +61,7 @@ export function useOrderEventRefresh(
 
   const socketRef = useRef<Socket | null>(null)
   const refreshFnRef = useRef(refreshFn)
+  const eventsKey = events.join('|')
 
   // Keep refresh function reference up to date
   useEffect(() => {
@@ -100,7 +101,7 @@ export function useOrderEventRefresh(
       })
       socket.disconnect()
     }
-  }, [events, delay, enabled])
+  }, [eventsKey, delay, enabled])
 }
 
 /**
