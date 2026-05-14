@@ -868,6 +868,19 @@ def get_session_status():
             {"status": "success", "message": "Not authenticated", "authenticated": False, "logged_in": False}
         ), 200
 
+    # Keep /auth/session-status consistent with routes protected by
+    # @check_session_validity. An expired browser session should make the React
+    # app render the login page immediately, not report authenticated=true and
+    # then wedge on the next guarded bootstrap endpoint.
+    from utils.session import is_session_valid
+
+    if not is_session_valid():
+        logger.info("Session status: expired browser session detected; clearing session")
+        session.clear()
+        return jsonify(
+            {"status": "success", "message": "Session expired", "authenticated": False, "logged_in": False}
+        ), 200
+
     # If session claims to be logged in with broker, validate the auth token exists
     if session.get("logged_in") and session.get("broker"):
         from database.auth_db import get_api_key_for_tradingview, get_auth_token

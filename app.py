@@ -201,6 +201,14 @@ def create_app():
     if USE_HTTPS:
         app.config["WTF_CSRF_COOKIE_NAME"] = f"__Secure-{csrf_cookie_name}"
 
+    # Flask-WTF defaults to requiring a Referer header for HTTPS POSTs.
+    # That is fragile for the React SPA behind Cloudflare / privacy browsers:
+    # a valid token+session can still fail login with "The referrer header is
+    # missing" before credentials are checked. Keep CSRF token validation on,
+    # but disable the separate HTTPS Referer strictness unless explicitly set.
+    csrf_ssl_strict = os.getenv("WTF_CSRF_SSL_STRICT", "FALSE").upper() == "TRUE"
+    app.config["WTF_CSRF_SSL_STRICT"] = csrf_ssl_strict
+
     # Parse CSRF time limit from environment
     csrf_time_limit = os.getenv("CSRF_TIME_LIMIT", "").strip()
     if csrf_time_limit:

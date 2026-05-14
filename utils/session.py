@@ -60,10 +60,18 @@ def is_session_valid():
         logger.debug("Session invalid: 'logged_in' flag not set")
         return False
 
-    # If no login time is set, consider session invalid
+    # If no login time is set but the session is otherwise broker-authenticated,
+    # repair it instead of treating it as invalid. After upstream updates or
+    # older OAuth/login flows, browser sessions can contain user/broker/logged_in
+    # without login_time. Returning False here makes check_session_validity call
+    # revoke_user_tokens(), which can wedge the eventlet worker during React
+    # bootstrap (/api/broker/capabilities) and leaves the UI stuck on the
+    # global spinner. Starting the expiry clock now preserves the valid broker
+    # session and avoids destructive token revocation from a read-only UI call.
     if "login_time" not in session:
-        logger.debug("Session invalid: 'login_time' not in session")
-        return False
+        logger.warning("Session missing login_time; repairing authenticated session timestamp")
+        set_session_login_time()
+        return True
 
     # Skip expiry check for crypto brokers (24/7 markets)
     if is_session_expiry_disabled():
@@ -191,11 +199,7 @@ def check_session_validity(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not is_session_valid():
-            # Revoke tokens before clearing session
-            revoke_user_tokens()
-            session.clear()
-
-            # Check if this is an AJAX/fetch request
+            # Check if this is an AJAX/fetch/API request before mutating state.
             from flask import jsonify, request
 
             is_ajax = (
@@ -203,12 +207,22 @@ def check_session_validity(f):
                 or request.headers.get("Accept", "").startswith("application/json")
                 or request.content_type == "application/json"
                 or request.is_json
+                or request.path.startswith("/api/")
+                or request.path.startswith("/auth/")
             )
 
+            # Do NOT revoke broker/API tokens from read-only route guards.
+            # During the 2026-05-14 upstream update, an expired browser session
+            # hit /api/broker/capabilities during React bootstrap; the old code
+            # called revoke_user_tokens(), which publishes cache invalidation and
+            # can crash/wedge the single eventlet worker with greenlet.error.
+            # Clearing the browser session is sufficient; explicit logout/token
+            # rotation paths can revoke credentials deliberately.
+            logger.info("Invalid session detected - clearing browser session without token revocation")
+            session.clear()
+
             if is_ajax:
-                # Return JSON response for AJAX requests instead of redirect
-                # This prevents consuming rate limits on the login endpoint
-                logger.info("Invalid session detected - returning 401 for AJAX request")
+                logger.info("Invalid session detected - returning 401 for AJAX/API request")
                 return jsonify(
                     {
                         "status": "error",
