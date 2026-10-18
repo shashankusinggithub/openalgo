@@ -57,8 +57,36 @@ def get_host_server() -> str:
     """
     return os.getenv("HOST_SERVER", "http://127.0.0.1:5000")
 
+
+def build_external_url(path: str) -> str:
+    """
+    Build an absolute URL for an outbound link, rooted at the configured HOST_SERVER.
+
+    Use this instead of ``url_for(..., _external=True)`` for any URL that leaves
+    the server - password reset emails, broker OAuth callbacks. Flask derives the
+    scheme and host for ``_external=True`` from the incoming request's ``Host``
+    header, which is attacker-controlled: a poisoned header rewrites the link to
+    an origin of the attacker's choosing, and whoever follows it (the account
+    owner reading their email, or the broker redirecting after OAuth) hands over
+    the token in the URL. HOST_SERVER is set by every official install script and
+    is not influenced by the request, so it cannot be poisoned this way.
+
+    Args:
+        path: Root-relative path, normally the return value of ``url_for()``
+            called without ``_external``. A leading slash is optional.
+
+    Returns:
+        str: Absolute URL rooted at HOST_SERVER.
+    """
+    base = get_host_server().strip().rstrip("/")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
+
+
 def get_broker_totp_secret():
     return os.getenv("BROKER_TOTP_SECRET")
+
 
 def get_broker_issuer():
     return os.getenv("BROKER_ISSUER")

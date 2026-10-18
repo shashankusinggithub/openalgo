@@ -1,14 +1,51 @@
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from typing import Any
 
 import pandas as pd
 
+from broker.iiflcapital.api.rate_limiter import (
+    MAX_RETRIES,
+    apply_rate_limit,
+    is_rate_limited,
+    retry_delay_from_headers,
+)
 from broker.iiflcapital.baseurl import BASE_URL
+from broker.iiflcapital.streaming.iiflcapital_mapping import supports_open_interest
 from database.token_db import get_brexchange, get_token
+from utils import runtime
+from utils.broker_backpressure import BrokerBusyError, cap_server_delay
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
+from utils.shared_executors import get_executor
 
 logger = get_logger(__name__)
+
+# IIFL exposes OI on a separate single-mode endpoint, so an option chain
+# pull does N HTTP roundtrips. The shared httpx client allows up to 100
+# concurrent connections; cap fanout at 32 so a 60-leg chain finishes in
+# ~2 batches (~400 ms) instead of the previous 8-worker loop (~1.6 s).
+_OI_MAX_WORKERS = 32
+
+# Under the gthread worker the fan-out uses one process-wide pool of this size
+# instead of up to 32 new threads per request: those are real OS threads there,
+# outside the request pool, multiplied by every option chain refreshing at once.
+# At the 8 req/sec pace in rate_limiter, 8 workers keep the pacer the limit.
+_OI_SHARED_WORKERS = 8
+
+
+def _oi_pool(legs: int):
+    """The executor for one OI fan-out, as a context manager.
+
+    Under eventlet and the dev server this is a pool of its own per call,
+    exactly as before (green threads under eventlet). Under gthread it is the
+    shared pool, which the ``with`` block must not shut down.
+    """
+    if runtime.gthread_active():
+        return nullcontext(get_executor("iifl-open-interest", _OI_SHARED_WORKERS))
+    return ThreadPoolExecutor(max_workers=min(_OI_MAX_WORKERS, legs))
 
 
 def _try_json(value: Any) -> Any:
@@ -434,13 +471,28 @@ class BrokerData:
             "M": "monthly",
         }
 
-    def _post(self, endpoint: str, payload: Any) -> Any:
+    def _post(self, endpoint: str, payload: Any, _retry_count: int = 0) -> Any:
+        """
+        POST to an IIFL Capital data endpoint through the shared connection pool.
+
+        This is the single choke point every data.py HTTP call goes through
+        (get_quotes, get_multiquotes, get_depth, get_history, and the OI
+        fetches used by option-chain/OI-tracker/GEX tools), so pacing it with
+        apply_rate_limit() paces all of them -- including the up-to-32-way
+        concurrent fanout in _fetch_openinterest_map -- against IIFL's
+        documented per-category caps (see broker.iiflcapital.api.rate_limiter).
+        On a rate-limit rejection (HTTP 429, detected primarily; a generic
+        retry-hint message as fallback) this retries with backoff instead of
+        surfacing the failure immediately.
+        """
         client = get_httpx_client()
         headers = {
             "Authorization": f"Bearer {self.auth_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+
+        apply_rate_limit("data")
 
         response = client.post(f"{BASE_URL}{endpoint}", headers=headers, json=payload)
         try:
@@ -460,6 +512,26 @@ class BrokerData:
             ) or (
                 data.get("error") if isinstance(data, dict) else None
             ) or f"Request failed with HTTP {response.status_code}"
+
+            if is_rate_limited(response.status_code, message) and _retry_count < MAX_RETRIES:
+                # Under gthread a delay past the data ceiling is not slept out.
+                delay = cap_server_delay(
+                    retry_delay_from_headers(response.headers, _retry_count), "data"
+                )
+                if delay is not None:
+                    logger.warning(
+                        f"IIFL Capital data API rate limited on {endpoint}. Retrying in "
+                        f"{delay:.2f}s (attempt {_retry_count + 1}/{MAX_RETRIES})"
+                    )
+                    time.sleep(delay)
+                    return self._post(endpoint, payload, _retry_count + 1)
+                # gthread only (cap_server_delay never answers None elsewhere):
+                # the broker asked for a wait past the ceiling, which is the
+                # busy answer, not a failure of the request.
+                raise BrokerBusyError(
+                    retry_after=retry_delay_from_headers(response.headers, _retry_count)
+                )
+
             raise Exception(message)
 
         return data
@@ -471,6 +543,64 @@ class BrokerData:
             return rows
 
         raise Exception("No quote rows in broker response")
+
+    def _fetch_openinterest(self, instrument: dict) -> int:
+        """
+        Fetch open interest for one F&O instrument.
+
+        IIFL's /marketdata/openinterest is single-mode only and lives on a
+        separate endpoint from marketquotes (which never returns OI). Best
+        effort — returns 0 on any failure so a flaky OI call never blocks
+        the quote/option-chain response.
+        """
+        try:
+            response = self._post("/marketdata/openinterest", instrument)
+        except BrokerBusyError:
+            # Refused by the pacer (gthread only). Still best effort, but said
+            # out loud: a 0 here is "not fetched", not "no open interest".
+            logger.warning(
+                f"IIFL open interest for {instrument} was not fetched: too many IIFL "
+                "requests were already waiting. It shows as 0 until the next refresh."
+            )
+            return 0
+        except Exception as exc:
+            logger.debug(f"IIFL OI fetch failed for {instrument}: {exc}")
+            return 0
+
+        if not isinstance(response, dict):
+            return 0
+
+        result = response.get("result", response)
+        if isinstance(result, list) and result:
+            result = result[0]
+        if not isinstance(result, dict):
+            return 0
+
+        return _to_int(_first(result, ("openInterest", "oi"), 0))
+
+    def _fetch_openinterest_map(self, instruments: list[dict]) -> dict[str, int]:
+        """
+        Concurrently fetch OI for many instruments. Keyed by 'exchange:instrumentId'.
+        IIFL doesn't support batch OI, so option chains require one HTTP call per
+        leg — fanout capped at _OI_MAX_WORKERS.
+        """
+        if not instruments:
+            return {}
+
+        oi_map: dict[str, int] = {}
+        with _oi_pool(len(instruments)) as pool:
+            futures = {
+                pool.submit(self._fetch_openinterest, inst): (
+                    f"{str(inst['exchange']).upper()}:{inst['instrumentId']}"
+                )
+                for inst in instruments
+            }
+            for future, key in futures.items():
+                try:
+                    oi_map[key] = future.result()
+                except Exception:
+                    oi_map[key] = 0
+        return oi_map
 
     def _resolve_token(self, symbol: str, exchange: str) -> str:
         token = get_token(symbol, exchange)
@@ -489,7 +619,8 @@ class BrokerData:
         }
 
     def get_quotes(self, symbol: str, exchange: str) -> dict:
-        rows = self._fetch_marketquote_rows([self._instrument(symbol, exchange)])
+        instrument = self._instrument(symbol, exchange)
+        rows = self._fetch_marketquote_rows([instrument])
         if not rows:
             raise Exception("No quote data received from broker")
 
@@ -504,7 +635,10 @@ class BrokerData:
         if not _looks_like_market_row(row):
             raise Exception("No quote data received from broker")
 
-        return _parse_quote_row(row)
+        parsed = _parse_quote_row(row)
+        if supports_open_interest(str(exchange).upper()):
+            parsed["oi"] = self._fetch_openinterest(instrument)
+        return parsed
 
     def get_multiquotes(self, symbols: list) -> list:
         instruments = []
@@ -549,6 +683,15 @@ class BrokerData:
             return skipped
 
         rows = self._fetch_marketquote_rows(instruments)
+
+        # IIFL OI lives on a separate single-mode endpoint. Fetch concurrently
+        # for F&O legs only (cash equities have no OI) and merge by identity.
+        oi_instruments = [
+            v["instrument"]
+            for v in valid_symbols
+            if supports_open_interest(str(v["exchange"]).upper())
+        ]
+        oi_map = self._fetch_openinterest_map(oi_instruments)
 
         parsed_rows = []
         rows_by_identity: dict[str, dict] = {}
@@ -601,18 +744,24 @@ class BrokerData:
                 )
                 continue
 
+            parsed = _parse_quote_row(row)
+            oi_key = f"{str(instrument['exchange']).upper()}:{instrument['instrumentId']}"
+            if oi_key in oi_map:
+                parsed["oi"] = oi_map[oi_key]
+
             results.append(
                 {
                     "symbol": original["symbol"],
                     "exchange": original["exchange"],
-                    "data": _parse_quote_row(row),
+                    "data": parsed,
                 }
             )
 
         return skipped + results
 
     def get_depth(self, symbol: str, exchange: str) -> dict:
-        payload = self._instrument(symbol, exchange)
+        instrument = self._instrument(symbol, exchange)
+        payload = instrument
         response = self._post("/marketdata/marketdepth", payload)
 
         rows = _extract_rows(response)
@@ -637,6 +786,8 @@ class BrokerData:
         prev_close = _to_float(_first(row, ("close", "previousClose"), 0))
         volume = _to_int(_first(row, ("volume", "tradedVolume"), 0))
         oi = _to_int(_first(row, ("oi", "openInterest"), 0))
+        if oi == 0 and supports_open_interest(str(exchange).upper()):
+            oi = self._fetch_openinterest(instrument)
         total_buy_qty = _to_int(
             _first(
                 row,

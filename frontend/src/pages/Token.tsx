@@ -1,6 +1,6 @@
 import { Check, ChevronDown, History, Info, Search, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -175,7 +175,7 @@ export default function Token() {
             setExpiries(data.expiries)
           }
         }
-      } catch (error) {
+      } catch (_error) {
       } finally {
         if (requestId === fnoRequestIdRef.current) {
           setIsFnoLoading(false)
@@ -202,7 +202,7 @@ export default function Token() {
             setExpiries(data.expiries)
           }
         }
-      } catch (error) {}
+      } catch (_error) {}
     }
 
     fetchExpiriesForUnderlying()
@@ -239,7 +239,7 @@ export default function Token() {
         const data = await response.json()
         setSearchResults((data.results || []).slice(0, 10))
         setShowResults(true)
-      } catch (error) {
+      } catch (_error) {
         setSearchResults([])
       } finally {
         setIsLoading(false)

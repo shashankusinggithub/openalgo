@@ -1,5 +1,3 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import {
   ArrowLeft,
   Briefcase,
@@ -11,10 +9,15 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router'
 import { apiClient } from '@/api/client'
-import { useAuthStore } from '@/stores/authStore'
-import { useMarketData } from '@/hooks/useMarketData'
-import { Button } from '@/components/ui/button'
+import {
+  type PortfolioEntry,
+  type PortfolioLeg,
+  strategyPortfolioApi,
+  type Watchlist,
+} from '@/api/strategy-portfolio'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -25,15 +28,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { showToast } from '@/utils/toast'
+import { useMarketData } from '@/hooks/useMarketData'
+import { isLegClosed } from '@/lib/strategyMath'
 import { cn } from '@/lib/utils'
-import {
-  strategyPortfolioApi,
-  type PortfolioEntry,
-  type PortfolioLeg,
-  type Watchlist,
-} from '@/api/strategy-portfolio'
+import { useAuthStore } from '@/stores/authStore'
+import { showToast } from '@/utils/toast'
 
 // Map a portfolio entry's `exchange` (which may be NSE_INDEX / BSE_INDEX etc.
 // since it's the index underlying's exchange) to the F&O exchange that the
@@ -46,8 +47,18 @@ function optionExchangeFor(exchange: string): string {
 }
 
 const MONTHS: Record<string, number> = {
-  JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
-  JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
+  JAN: 0,
+  FEB: 1,
+  MAR: 2,
+  APR: 3,
+  MAY: 4,
+  JUN: 5,
+  JUL: 6,
+  AUG: 7,
+  SEP: 8,
+  OCT: 9,
+  NOV: 10,
+  DEC: 11,
 }
 
 /**
@@ -81,7 +92,7 @@ function isExpired(leg: PortfolioLeg, now: Date): boolean {
 function legPnl(leg: PortfolioLeg, currentLtp: number | undefined): number {
   const sign = leg.side === 'BUY' ? 1 : -1
   const qty = leg.lots * leg.lotSize
-  if (leg.exitPrice !== undefined && leg.exitPrice > 0) {
+  if (isLegClosed(leg)) {
     return sign * (leg.exitPrice - leg.price) * qty
   }
   if (currentLtp === undefined) return 0
@@ -243,7 +254,7 @@ export default function StrategyPortfolio() {
       const ex = optionExchangeFor(entry.exchange)
       for (const leg of entry.legs) {
         if (!leg.symbol) continue
-        if (leg.exitPrice !== undefined && leg.exitPrice > 0) continue
+        if (isLegClosed(leg)) continue
         if (isExpired(leg, now)) continue
         const key = `${ex}:${leg.symbol}`
         if (seen.has(key)) continue
@@ -348,7 +359,7 @@ export default function StrategyPortfolio() {
       let closedCount = 0
       for (const leg of entry.legs) {
         pnl += legPnl(leg, pricesBySymbol[leg.symbol])
-        if (leg.exitPrice !== undefined && leg.exitPrice > 0) closedCount++
+        if (isLegClosed(leg)) closedCount++
       }
       const status: 'open' | 'partial' | 'closed' =
         entry.legs.length === 0
@@ -643,9 +654,12 @@ export default function StrategyPortfolio() {
                                 )}
                               >
                                 {pnlKnown
-                                  ? `${pnl >= 0 ? '+' : '-'}₹${Math.abs(pnl).toLocaleString('en-IN', {
-                                      maximumFractionDigits: 0,
-                                    })}`
+                                  ? `${pnl >= 0 ? '+' : '-'}₹${Math.abs(pnl).toLocaleString(
+                                      'en-IN',
+                                      {
+                                        maximumFractionDigits: 0,
+                                      }
+                                    )}`
                                   : '—'}
                               </span>
                             </div>
@@ -685,8 +699,12 @@ export default function StrategyPortfolio() {
                                     <th className="px-4 py-2 text-left font-medium">Ticker</th>
                                     <th className="px-3 py-2 text-left font-medium">Trade Type</th>
                                     <th className="px-3 py-2 text-right font-medium">Qty</th>
-                                    <th className="px-3 py-2 text-right font-medium">Entry Price</th>
-                                    <th className="px-3 py-2 text-right font-medium">Current Price</th>
+                                    <th className="px-3 py-2 text-right font-medium">
+                                      Entry Price
+                                    </th>
+                                    <th className="px-3 py-2 text-right font-medium">
+                                      Current Price
+                                    </th>
                                     <th className="px-3 py-2 text-right font-medium">Exit Price</th>
                                     <th className="px-3 py-2 text-right font-medium">P&amp;L</th>
                                     <th className="px-3 py-2 text-center font-medium">Status</th>
@@ -694,20 +712,20 @@ export default function StrategyPortfolio() {
                                 </thead>
                                 <tbody className="divide-y">
                                   {entry.legs.map((leg, i) => {
-                                    const isClosed =
-                                      leg.exitPrice !== undefined && leg.exitPrice > 0
+                                    const isClosed = isLegClosed(leg)
                                     const legExpired = !isClosed && isExpired(leg, new Date())
                                     const currentLtp = pricesBySymbol[leg.symbol]
                                     const qty = leg.lots * leg.lotSize
                                     const pnl = legPnl(leg, currentLtp)
                                     return (
-                                      <tr
-                                        key={i}
-                                        className={cn(isClosed && 'bg-rose-500/5')}
-                                      >
+                                      <tr key={i} className={cn(isClosed && 'bg-rose-500/5')}>
                                         <td className="px-4 py-2 font-medium">
                                           <div className="flex flex-col">
-                                            <span className={cn(isClosed && 'line-through text-muted-foreground')}>
+                                            <span
+                                              className={cn(
+                                                isClosed && 'line-through text-muted-foreground'
+                                              )}
+                                            >
                                               {leg.symbol || describeLeg(leg)}
                                             </span>
                                             <span className="text-[10px] text-muted-foreground">
@@ -744,14 +762,14 @@ export default function StrategyPortfolio() {
                                           )}
                                         </td>
                                         <td className="px-3 py-2 text-right tabular-nums">
-                                          {isClosed
-                                            ? `₹${(leg.exitPrice ?? 0).toFixed(2)}`
-                                            : '—'}
+                                          {isClosed ? `₹${(leg.exitPrice ?? 0).toFixed(2)}` : '—'}
                                         </td>
                                         <td className="px-3 py-2 text-right">
                                           <PnlCell
                                             value={pnl}
-                                            showDash={pnl === 0 && !isClosed && currentLtp === undefined}
+                                            showDash={
+                                              pnl === 0 && !isClosed && currentLtp === undefined
+                                            }
                                           />
                                         </td>
                                         <td className="px-3 py-2 text-center">
@@ -802,10 +820,8 @@ export default function StrategyPortfolio() {
             <AlertDialogTitle>Delete strategy?</AlertDialogTitle>
             <AlertDialogDescription>
               This will permanently remove{' '}
-              <span className="font-semibold text-foreground">
-                {pendingDelete?.name}
-              </span>{' '}
-              from your portfolio. This action cannot be undone.
+              <span className="font-semibold text-foreground">{pendingDelete?.name}</span> from your
+              portfolio. This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

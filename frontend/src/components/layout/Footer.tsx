@@ -21,8 +21,7 @@ export function Footer({ className }: FooterProps) {
         if (data.status === 'success') {
           setVersion(data.version)
         }
-      } catch (error) {
-      }
+      } catch (_error) {}
     }
 
     fetchVersion()
@@ -44,21 +43,24 @@ export function Footer({ className }: FooterProps) {
               www.openalgo.in
             </a>
           </div>
-          <span className="hidden md:inline">|</span>
           <span className="text-center">Open Source Algo Platform for Everyone</span>
-          <span className="hidden md:inline">|</span>
           {version && (
-            <Badge variant="secondary" className="gap-1">
-              <span className="opacity-75">v</span>
-              <span>{version}</span>
-            </Badge>
+            <>
+              <span className="hidden md:inline">|</span>
+              <Badge variant="secondary" className="gap-1">
+                <span className="opacity-75">v</span>
+                <span>{version}</span>
+              </Badge>
+            </>
           )}
           {activeSessionCount > 0 && (
             <>
               <span className="hidden md:inline">|</span>
               <Badge variant="outline" className="gap-1">
                 <Monitor className="h-3 w-3" />
-                <span>{activeSessionCount} {activeSessionCount === 1 ? 'session' : 'sessions'}</span>
+                <span>
+                  {activeSessionCount} {activeSessionCount === 1 ? 'session' : 'sessions'}
+                </span>
               </Badge>
             </>
           )}

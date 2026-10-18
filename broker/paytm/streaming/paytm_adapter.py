@@ -1,6 +1,5 @@
 import atexit
 import json
-import logging
 import os
 import sys
 import threading
@@ -8,8 +7,14 @@ import time
 from typing import Any, Dict, List, Optional
 
 from broker.paytm.streaming.paytm_websocket import PaytmWebSocket
-from database.auth_db import get_auth_token, get_feed_token
+from database.auth_db import (
+    decrypt_token,
+    get_auth_token,
+    get_feed_token,
+    get_feed_token_dbquery,
+)
 from database.token_db import get_br_symbol, get_symbol, get_token
+from utils.logging import get_logger
 
 # Add parent directory to path to allow imports
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../../"))
@@ -25,7 +30,7 @@ class PaytmWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
     def __init__(self):
         super().__init__()
-        self.logger = logging.getLogger("paytm_websocket")
+        self.logger = get_logger("paytm_websocket")
         self.ws_client = None
         self.user_id = None
         self.broker_name = "paytm"
@@ -145,6 +150,33 @@ class PaytmWebSocketAdapter(BaseBrokerWebSocketAdapter):
             atexit.register(self.disconnect)
             self._atexit_registered = True
 
+    def _refresh_feed_token(self) -> None:
+        """
+        Re-read a fresh feed token (public_access_token) from the database and
+        update the WebSocket client so the next connect bakes it into the URL.
+
+        Paytm stores the streaming token as feed_token, fetched via
+        get_feed_token() in initialize(). get_feed_token() does not support
+        bypassing its cache, so read directly from the DB via
+        get_feed_token_dbquery() and decrypt to force a fresh value. Keeps the
+        existing token on any failure (logs a warning) so reconnect never crashes.
+        """
+        if not self.user_id or not self.ws_client:
+            return
+        try:
+            auth_obj = get_feed_token_dbquery(self.user_id)
+            fresh_token = None
+            if auth_obj is not None and getattr(auth_obj, "feed_token", None):
+                fresh_token = decrypt_token(auth_obj.feed_token)
+            if fresh_token:
+                self.ws_client.public_access_token = fresh_token
+            else:
+                self.logger.warning(
+                    "No fresh Paytm feed token found; keeping existing token"
+                )
+        except Exception as e:
+            self.logger.warning(f"Failed to re-read fresh Paytm feed token: {e}")
+
     def connect(self) -> None:
         """Establish connection to Paytm WebSocket"""
         if not self.ws_client:
@@ -191,6 +223,13 @@ class PaytmWebSocketAdapter(BaseBrokerWebSocketAdapter):
                     self.logger.info(
                         f"Connecting to Paytm WebSocket (attempt {self.reconnect_attempts + 1})"
                     )
+                    # Re-read a fresh feed token from the database before each
+                    # connect attempt. Indian broker tokens roll over daily
+                    # (~3 AM IST); the construction-time token is dead after
+                    # rollover. PaytmWebSocket.connect() bakes
+                    # self.public_access_token into the URL each call, so
+                    # updating it here is picked up on this attempt.
+                    self._refresh_feed_token()
                     self.ws_client.connect()  # blocks until the socket closes
                 except Exception as e:
                     self.logger.error(f"Connection error: {e}")

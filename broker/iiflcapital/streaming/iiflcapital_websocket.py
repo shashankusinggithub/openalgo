@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import json
+import os
 import struct
 import threading
 import time
@@ -107,6 +108,10 @@ def _decode_jwt_username(token: str) -> str:
     Extract `preferred_username` from a JWT (matches bridgePy's
     __get_user_name). The JWT payload (middle segment) is URL-safe base64
     without padding, so we pad it before decoding.
+
+    Raises ValueError on malformed/expired tokens — the previous "tester"
+    fallback silently masqueraded as a hardcoded username and masked
+    misconfiguration.
     """
     try:
         payload_segment = token.split(".")[1]
@@ -114,9 +119,13 @@ def _decode_jwt_username(token: str) -> str:
         padded = payload_segment + ("=" * padding_needed)
         decoded = base64.urlsafe_b64decode(padded)
         claims = json.loads(decoded)
-        return str(claims.get("preferred_username", "tester"))
-    except Exception:
-        return "tester"
+    except Exception as exc:
+        raise ValueError(f"Invalid IIFL user_session JWT: {type(exc).__name__}") from exc
+
+    username = claims.get("preferred_username")
+    if not username:
+        raise ValueError("IIFL JWT missing 'preferred_username' claim")
+    return str(username)
 
 
 def _decode_market_feed(payload: bytes) -> dict | None:
@@ -233,17 +242,29 @@ class IiflcapitalWebSocket:
         host: str = "bridge.iiflcapital.com",
         port: int = 8883,
         on_ticks: Callable[[list[dict]], None] | None = None,
+        token_provider: Callable[[], str | None] | None = None,
     ) -> None:
         if not user_session:
             raise ValueError("user_session is required")
 
         self.user_session = user_session
+        # Optional zero-arg callable returning a fresh user_session (JWT) from
+        # the DB. Called before each reconnect so a daily-rolled token (~3 AM
+        # IST) is used instead of the dead construction-time session.
+        self.token_provider = token_provider
         self.host = host
         self.port = port
         self.on_ticks = on_ticks
         self.logger = get_logger("iiflcapital_websocket")
 
-        self.client_id = "openalgo" + datetime.now().strftime("%d%m%y%H%M%S%f")
+        # Microsecond timestamp + 4 bytes entropy avoids client_id collisions
+        # when two reconnects fire on the same host within the same microsecond
+        # (broker drops the older session with CONNACK rc=2 on collision).
+        self.client_id = (
+            "openalgo"
+            + datetime.now().strftime("%d%m%y%H%M%S%f")
+            + os.urandom(4).hex()
+        )
         self.username = _decode_jwt_username(user_session)
         self.password = f"OPENID~~{user_session}~"  # bridgePy format
 
@@ -612,6 +633,32 @@ class IiflcapitalWebSocket:
             except Exception:
                 pass
 
+    def _refresh_user_session(self) -> None:
+        """Re-read a fresh user_session (JWT) from the DB via token_provider and
+        re-derive the MQTT username/password from it. Keeps the existing
+        session if the provider yields nothing or the JWT is malformed."""
+        if not self.token_provider:
+            return
+        try:
+            fresh = self.token_provider()
+        except Exception as e:
+            self.logger.error(f"Error fetching fresh IIFL user_session: {e}")
+            return
+        if not fresh:
+            self.logger.warning(
+                "No fresh IIFL user_session available; reusing existing session"
+            )
+            return
+        try:
+            username = _decode_jwt_username(fresh)
+        except ValueError as e:
+            self.logger.error(f"Fresh IIFL user_session JWT invalid, reusing existing: {e}")
+            return
+        self.user_session = fresh
+        self.username = username
+        self.password = f"OPENID~~{fresh}~"  # bridgePy format
+        self.logger.info("Refreshed IIFL user_session before reconnect")
+
     # ----------------------------------------------------------------- reconnect
     def _schedule_reconnect(self) -> None:
         if self._reconnect_thread and self._reconnect_thread.is_alive():
@@ -647,6 +694,10 @@ class IiflcapitalWebSocket:
                 or self._fatal_error
             ):
                 return
+
+            # Re-read a fresh token before each reconnect so a daily-rolled
+            # session (~3 AM IST) is used instead of the dead one.
+            self._refresh_user_session()
 
             if self._do_connect():
                 return

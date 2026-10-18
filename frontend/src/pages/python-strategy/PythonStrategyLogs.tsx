@@ -1,7 +1,17 @@
-import { ArrowLeft, Clock, Copy, Download, FileText, HardDrive, RefreshCw, ScrollText, Trash2 } from 'lucide-react'
+import {
+  ArrowLeft,
+  Clock,
+  Copy,
+  Download,
+  FileText,
+  HardDrive,
+  RefreshCw,
+  Code2,
+  ScrollText,
+  Trash2,
+} from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { showToast } from '@/utils/toast'
+import { Link, useParams } from 'react-router'
 import { pythonStrategyApi } from '@/api/python-strategy'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -20,6 +30,7 @@ import { LogViewer } from '@/components/ui/log-viewer'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { LogContent, LogFile, PythonStrategy } from '@/types/python-strategy'
+import { showToast } from '@/utils/toast'
 
 export default function PythonStrategyLogs() {
   const { strategyId } = useParams<{ strategyId: string }>()
@@ -48,7 +59,7 @@ export default function PythonStrategyLogs() {
       if (logsData.length > 0 && !selectedLog) {
         setSelectedLog(logsData[0].name)
       }
-    } catch (error) {
+    } catch (_error) {
       showToast.error('Failed to load logs', 'pythonStrategy')
     } finally {
       setLoading(false)
@@ -64,7 +75,7 @@ export default function PythonStrategyLogs() {
       }
       const content = await pythonStrategyApi.getLogContent(strategyId, logName)
       setLogContent(content)
-    } catch (error) {
+    } catch (_error) {
       // Only show toast for manual fetch, not auto-refresh
       if (showLoading) {
         showToast.error('Failed to load log content', 'pythonStrategy')
@@ -76,19 +87,20 @@ export default function PythonStrategyLogs() {
     }
   }
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one-time initial load on mount; fetchData is recreated every render and must not retrigger this effect
   useEffect(() => {
     fetchData()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-fetch only when the selected log changes; fetchLogContent is recreated every render and adding it would refetch on every render
   useEffect(() => {
     if (selectedLog) {
       fetchLogContent(selectedLog)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLog])
 
   // Auto-refresh if strategy is running and auto-refresh is enabled
+  // biome-ignore lint/correctness/useExhaustiveDependencies: interval should reset only on status/selection/autoRefresh changes; fetchLogContent is recreated every render and adding it would tear down and recreate the 3s interval each render
   useEffect(() => {
     if (strategy?.status === 'running' && selectedLog && autoRefresh) {
       const interval = setInterval(() => {
@@ -97,7 +109,6 @@ export default function PythonStrategyLogs() {
       }, 3000)
       return () => clearInterval(interval)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strategy?.status, selectedLog, autoRefresh])
 
   const handleClearLogs = async () => {
@@ -116,7 +127,7 @@ export default function PythonStrategyLogs() {
       } else {
         showToast.error(response.message || 'Failed to clear logs', 'pythonStrategy')
       }
-    } catch (error) {
+    } catch (_error) {
       showToast.error('Failed to clear logs', 'pythonStrategy')
     } finally {
       setClearing(false)
@@ -209,6 +220,12 @@ export default function PythonStrategyLogs() {
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
           </Button>
+          <Button variant="outline" size="sm" asChild>
+            <Link to={`/python/${strategy.id}/edit`}>
+              <Code2 className="h-4 w-4 mr-2" />
+              Edit Code
+            </Link>
+          </Button>
           <Button
             variant="destructive"
             size="sm"
@@ -240,6 +257,7 @@ export default function PythonStrategyLogs() {
                 <div className="space-y-2">
                   {logFiles.map((log) => (
                     <button
+                      type="button"
                       key={log.name}
                       onClick={() => setSelectedLog(log.name)}
                       className={`w-full text-left p-3 rounded-lg transition-colors ${

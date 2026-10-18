@@ -4,7 +4,6 @@ Handles both 5-level and 20-level market depth connections
 """
 
 import json
-import logging
 import struct
 import threading
 import time
@@ -13,6 +12,9 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
 import websocket
+
+from database.auth_db import get_auth_token
+from utils.logging import get_logger
 
 
 class DhanWebSocket:
@@ -33,12 +35,27 @@ class DhanWebSocket:
         50: "DISCONNECT",
     }
 
-    # Request codes
+    # Request codes.
+    #
+    # Dhan does support explicit unsubscribe, contrary to a long-standing
+    # comment in this file. Verified on the live feed: subscribing to
+    # MCX_COMM/581725 with code 15 delivered ticks, and code 16 stopped them
+    # dead (issue #1924).
+    #
+    # UNSUBSCRIBE_20_DEPTH is the one code not confirmed here. Dhan's live
+    # annexure documents 24, but the vendored copy in broker-api-docs says 25,
+    # and it could not be settled on the wire because 20-depth returns no
+    # packets outside NSE market hours. 24 follows the live documentation;
+    # re-check against a live depth feed before relying on it.
     REQUEST_CODES = {
         "SUBSCRIBE_TICKER": 15,
+        "UNSUBSCRIBE_TICKER": 16,
         "SUBSCRIBE_QUOTE": 17,
+        "UNSUBSCRIBE_QUOTE": 18,
         "SUBSCRIBE_FULL": 21,
+        "UNSUBSCRIBE_FULL": 22,
         "SUBSCRIBE_20_DEPTH": 23,
+        "UNSUBSCRIBE_20_DEPTH": 24,
         "DISCONNECT": 12,
     }
 
@@ -49,7 +66,13 @@ class DhanWebSocket:
     HEALTH_CHECK_INTERVAL = 30
     DATA_TIMEOUT = 90
 
-    def __init__(self, client_id: str, access_token: str, is_20_depth: bool = False):
+    def __init__(
+        self,
+        client_id: str,
+        access_token: str,
+        is_20_depth: bool = False,
+        user_id: str | None = None,
+    ):
         """
         Initialize Dhan WebSocket client
 
@@ -57,10 +80,13 @@ class DhanWebSocket:
             client_id: Dhan client ID
             access_token: Access token for authentication
             is_20_depth: If True, connects to 20-level depth endpoint
+            user_id: OpenAlgo user id, used to re-read a fresh access token from
+                the database on reconnect (tokens roll over daily at ~3 AM IST)
         """
         self.client_id = client_id
         self.access_token = access_token
         self.is_20_depth = is_20_depth
+        self.user_id = user_id
 
         # WebSocket connection
         self.ws = None
@@ -92,7 +118,7 @@ class DhanWebSocket:
         self._health_check_thread: threading.Thread | None = None
 
         # Logging
-        self.logger = logging.getLogger(f"dhan_websocket_{'20depth' if is_20_depth else '5depth'}")
+        self.logger = get_logger(f"dhan_websocket_{'20depth' if is_20_depth else '5depth'}")
 
         # Build WebSocket URL
         self._build_url()
@@ -115,6 +141,31 @@ class DhanWebSocket:
         self.logger.debug(
             f"Dhan WebSocket URL constructed: {self.ws_url[:100]}..."
         )  # Log first 100 chars for security
+
+    def _refresh_access_token(self):
+        """Re-read a fresh access token from the database and rebuild ws_url.
+
+        Indian broker tokens roll over daily at ~3 AM IST. On reconnect we must
+        re-read the current token from the database (bypassing the auth cache,
+        which can hold a stale token after rollover) and rebuild the URL that
+        embeds the token. If no fresh token is available, keep the existing one
+        rather than crashing.
+        """
+        if not self.user_id:
+            return
+        try:
+            fresh_token = get_auth_token(self.user_id, bypass_cache=True)
+            if not fresh_token:
+                self.logger.warning(
+                    "No fresh auth token found on reconnect - keeping existing token"
+                )
+                return
+            with self.lock:
+                self.access_token = fresh_token
+                self._build_url()
+            self.logger.info("Refreshed Dhan access token from database for reconnect")
+        except Exception as e:
+            self.logger.error(f"Error refreshing access token on reconnect: {e}")
 
     def connect(self):
         """Establish WebSocket connection"""
@@ -141,8 +192,11 @@ class DhanWebSocket:
                     on_message=self._on_message,
                     on_error=self._on_error,
                     on_close=self._on_close,
-                    on_ping=lambda ws, msg: self.logger.debug("Received ping"),
-                    on_pong=lambda ws, msg: self.logger.debug("Received pong"),
+                    # Stamp the liveness clock on protocol ping/pong too, not just
+                    # on broker code-0 heartbeats — so the data-stall watchdog can
+                    # never false-fire while the socket is provably alive.
+                    on_ping=lambda ws, msg: setattr(self, "last_message_time", time.time()),
+                    on_pong=lambda ws, msg: setattr(self, "last_message_time", time.time()),
                 )
 
                 # Run the WebSocket with ping interval
@@ -182,6 +236,13 @@ class DhanWebSocket:
                     f"Reconnecting in {delay} seconds... (attempt {reconnect_attempt}/{max_reconnect_attempts})"
                 )
                 time.sleep(delay)
+
+                # Re-read a fresh access token from the database before the loop
+                # rebuilds the WebSocketApp with self.ws_url. Without this, a
+                # reconnect after the ~3 AM IST daily token rollover would reuse
+                # the dead construction-time token and the feed would stay dead
+                # until a process restart.
+                self._refresh_access_token()
 
     def disconnect(self):
         """Disconnect from WebSocket with proper resource cleanup"""
@@ -292,16 +353,95 @@ class DhanWebSocket:
         return True
 
     def unsubscribe(self, instruments: list[dict[str, str]]):
-        """Unsubscribe from market data for instruments"""
-        # Dhan doesn't have explicit unsubscribe - just remove from tracking
+        """Unsubscribe from market data for instruments.
+
+        Sends the unsubscribe request Dhan actually supports, rather than only
+        forgetting the instrument locally. Without this a long-lived process
+        that rotates symbols accumulates subscriptions broker-side toward the
+        5,000-per-connection limit, invisibly - Dhan does not acknowledge
+        subscribes, so nothing on the wire reveals the leak, and only a
+        reconnect clears it (issue #1924).
+
+        The unsubscribe code depends on the mode the instrument was subscribed
+        in, so each one is grouped by its tracked mode. Local tracking is
+        cleared only after the request is sent, so a send failure leaves the
+        instrument tracked and it stays consistent with the broker.
+        """
+        if not instruments:
+            return True
+
+        # Not connected means there is no broker-side subscription left to
+        # cancel - the connection dropping already cleared it. Just drop local
+        # tracking, which also stops _resubscribe_all() restoring it later.
+        if not self.connected:
+            with self.lock:
+                for inst in instruments:
+                    self.subscriptions.pop(
+                        f"{inst['ExchangeSegment']}_{inst['SecurityId']}", None
+                    )
+            self.logger.debug(
+                f"Not connected; dropped {len(instruments)} instruments from tracking"
+            )
+            return True
+
+        # Group by the mode each instrument was actually subscribed in, and
+        # send the tracked instrument dict rather than the caller's, so the
+        # payload matches what was subscribed.
+        by_mode: dict[str, list[tuple[str, dict[str, str]]]] = {}
         with self.lock:
             for inst in instruments:
                 key = f"{inst['ExchangeSegment']}_{inst['SecurityId']}"
-                if key in self.subscriptions:
-                    del self.subscriptions[key]
+                tracked = self.subscriptions.get(key)
+                if tracked is None:
+                    continue
+                by_mode.setdefault(tracked["mode"], []).append((key, tracked["instrument"]))
 
-        self.logger.debug(f"Unsubscribed from {len(instruments)} instruments")
-        return True
+        if not by_mode:
+            self.logger.debug("No tracked subscriptions matched the unsubscribe request")
+            return True
+
+        # Same batch limits as subscribe().
+        max_batch_size = 50 if self.is_20_depth else 100
+        all_ok = True
+
+        for mode, entries in by_mode.items():
+            request_code = self.REQUEST_CODES.get(f"UNSUBSCRIBE_{mode}")
+            if request_code is None:
+                self.logger.error(f"No unsubscribe code for mode {mode}; leaving it subscribed")
+                all_ok = False
+                continue
+
+            for i in range(0, len(entries), max_batch_size):
+                batch = entries[i : i + max_batch_size]
+                unsubscribe_msg = {
+                    "RequestCode": request_code,
+                    "InstrumentCount": len(batch),
+                    "InstrumentList": [inst for _, inst in batch],
+                }
+
+                try:
+                    if not (self.ws and hasattr(self.ws, "send") and callable(self.ws.send)):
+                        self.logger.error("WebSocket not properly initialized for sending")
+                        return False
+
+                    self.ws.send(json.dumps(unsubscribe_msg))
+
+                    # Only now is it safe to forget them.
+                    with self.lock:
+                        for key, _ in batch:
+                            self.subscriptions.pop(key, None)
+
+                    self.logger.debug(
+                        f"Unsubscribed from {len(batch)} instruments in {mode} mode "
+                        f"(RequestCode {request_code})"
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        f"Error unsubscribing from instruments: {e}", exc_info=True
+                    )
+                    all_ok = False
+
+        return all_ok
 
     def _on_open(self, ws):
         """Handle WebSocket connection open"""

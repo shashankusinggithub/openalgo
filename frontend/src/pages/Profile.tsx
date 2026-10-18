@@ -27,7 +27,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { webClient } from '@/api/client'
 import TwoFactorEnforcement from '@/components/auth/TwoFactorEnforcement'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -207,11 +207,6 @@ const ALERT_CATEGORIES_TRADING: {
     description: 'Position close/update operations and P&L notifications',
   },
   {
-    key: 'strategy',
-    label: 'Strategy Management',
-    description: 'Strategy creation, symbol configuration, and webhook operations',
-  },
-  {
     key: 'chartink',
     label: 'Chartink',
     description: 'Chartink strategy operations and scanner integrations',
@@ -328,6 +323,7 @@ export default function ProfilePage() {
   // Check if in analyzer mode (theme changes blocked)
   const isAnalyzerMode = appMode === 'analyzer'
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one-time data load on mount; fetchProfileData/fetchBrokerCredentials are stable per-render fetchers and must not refire when their closures are recreated.
   useEffect(() => {
     fetchProfileData()
     fetchBrokerCredentials()
@@ -354,7 +350,7 @@ export default function ProfilePage() {
           setTestEmail(smtp.smtp_username || '')
         }
       }
-    } catch (error) {
+    } catch (_error) {
       showToast.error('Failed to load profile data', 'admin')
     } finally {
       setIsLoading(false)
@@ -373,7 +369,7 @@ export default function ProfilePage() {
         setHostServer(response.data.data.host_server)
         setWebsocketUrl(response.data.data.websocket_url || '')
       }
-    } catch (error) {}
+    } catch (_error) {}
   }
 
   const fetchPermissions = async () => {
@@ -385,7 +381,7 @@ export default function ProfilePage() {
       if (response.data.status === 'success') {
         setPermissionsData(response.data.data)
       }
-    } catch (error) {
+    } catch (_error) {
       showToast.error('Failed to load permission status', 'admin')
     } finally {
       setIsLoadingPermissions(false)
@@ -420,7 +416,7 @@ export default function ProfilePage() {
       } else {
         showToast.error('Failed to fix permissions', 'admin')
       }
-    } catch (error) {
+    } catch (_error) {
       showToast.error('Failed to fix permissions', 'admin')
     } finally {
       setIsFixingPermissions(false)
@@ -1137,6 +1133,23 @@ export default function ProfilePage() {
                   </AlertDescription>
                 </Alert>
               )}
+              {selectedBroker === 'indmoney' && (
+                <Alert className="bg-blue-50 dark:bg-blue-950 border-blue-200">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertTitle>IndMoney Credentials</AlertTitle>
+                  <AlertDescription>
+                    <p>
+                      <strong>API Key</strong>: the <code>Client ID</code> shown at indstocks.com
+                      &gt; API Trading &gt; Access Tokens after you set up TOTP.
+                    </p>
+                    <p className="mt-1">
+                      <strong>API Secret</strong>: leave blank to log in with MPIN + TOTP
+                      (recommended). If you paste an access token here instead, it is used as-is and
+                      the TOTP flow is skipped - you must regenerate it every 24 hours.
+                    </p>
+                  </AlertDescription>
+                </Alert>
+              )}
 
               {/* Save Button */}
               <Button
@@ -1623,9 +1636,6 @@ export default function ProfilePage() {
                 <ul className="list-disc list-inside space-y-1 ml-2">
                   <li>
                     <strong>Positions:</strong> Position close/update notifications
-                  </li>
-                  <li>
-                    <strong>Strategy:</strong> Strategy CRUD, symbol configuration, webhooks
                   </li>
                   <li>
                     <strong>Chartink:</strong> Chartink scanner and strategy integrations
@@ -2318,6 +2328,7 @@ export default function ProfilePage() {
                         size="icon"
                         variant="outline"
                         onClick={() => copyToClipboard(profileData.totp_secret!)}
+                        aria-label="Copy TOTP secret"
                       >
                         <Copy className="h-4 w-4" />
                       </Button>

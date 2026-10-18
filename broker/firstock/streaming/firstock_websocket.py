@@ -9,6 +9,9 @@ from urllib.parse import urlencode
 import websocket
 
 from utils.logging import get_logger
+from utils import runtime as _runtime
+
+_real_threading = _runtime.original("threading")
 
 
 class FirstockWebSocket:
@@ -29,7 +32,7 @@ class FirstockWebSocket:
     DISCONNECTED = 2
     ERROR = 3
 
-    def __init__(self, user_id, auth_token, max_retry_attempt=5, retry_delay=5):
+    def __init__(self, user_id, auth_token, max_retry_attempt=5, retry_delay=5, token_provider=None):
         """
         Initialize the Firstock WebSocket client
 
@@ -43,11 +46,17 @@ class FirstockWebSocket:
             Maximum number of retry attempts on connection failure
         retry_delay : int
             Delay between retry attempts in seconds
+        token_provider : callable, optional
+            Callable returning a fresh auth_token (susertoken) from the DB.
+            Used to refresh the token before each reconnect, since Firstock
+            tokens roll over daily at ~3 AM IST and the token is baked into
+            the connection URL.
         """
         self.user_id = user_id
         self.auth_token = auth_token
         self.max_retry_attempt = max_retry_attempt
         self.retry_delay = retry_delay
+        self.token_provider = token_provider
 
         # Connection management
         self.wsapp = None
@@ -65,9 +74,9 @@ class FirstockWebSocket:
         # _on_message auth-fail, _monitor_connection stale-pong) and the
         # self.wsapp = None null-out so racing closers don't clobber each
         # other or double-close.
-        self._close_lock = threading.Lock()
+        self._close_lock = _real_threading.Lock()
         # Wakes the supervisor loop out of its inter-retry sleep on shutdown.
-        self._shutdown_event = threading.Event()
+        self._shutdown_event = _real_threading.Event()
         self.last_pong_time = time.time()
         self.authenticated = False  # Track authentication status
 
@@ -80,6 +89,8 @@ class FirstockWebSocket:
 
         # Subscriptions tracking
         self.subscriptions = set()
+        self._subscription_tokens = {}
+        self._subscription_lock = _real_threading.Lock()
         self.pending_subscriptions = []  # Queue subscriptions until authenticated
 
         # Logger
@@ -93,6 +104,27 @@ class FirstockWebSocket:
         """Validate initialization parameters"""
         return bool(self.user_id and self.auth_token)
 
+    def _refresh_auth_token(self):
+        """Re-read a fresh auth token (susertoken) from the DB via token_provider.
+
+        Updates self.auth_token in place so the next _build_wsapp bakes the
+        current day's token into the connection URL. On failure the existing
+        token is kept.
+        """
+        if not self.token_provider:
+            return
+        try:
+            fresh = self.token_provider()
+            if fresh:
+                self.auth_token = fresh
+                self.logger.info("Refreshed Firstock auth token before reconnect")
+            else:
+                self.logger.warning(
+                    "Could not fetch fresh auth token on reconnect; using existing token"
+                )
+        except Exception as e:
+            self.logger.error(f"Error refreshing auth token before reconnect: {e}")
+
     def _build_wsapp(self):
         """
         Construct a fresh WebSocketApp bound to this instance's callbacks.
@@ -103,7 +135,7 @@ class FirstockWebSocket:
         """
         params = {"userId": self.user_id, "jKey": self.auth_token, "source": "developer-api"}
         connection_url = f"{self.ROOT_URI}?{urlencode(params)}"
-        self.logger.debug(f"Connection URL: {connection_url}")
+        self.logger.debug(f"Connection URL: {self.ROOT_URI}")
         return websocket.WebSocketApp(
             connection_url,
             on_open=self._on_open,
@@ -153,7 +185,7 @@ class FirstockWebSocket:
             self.logger.info(f"Connecting to Firstock WebSocket: {self.ROOT_URI}")
             self.logger.info(f"Using userId: {self.user_id}")
             self.logger.debug(
-                f"Using auth token (jKey): {self.auth_token[:10]}...{self.auth_token[-5:] if len(self.auth_token) > 15 else self.auth_token}"
+                f"Using auth token (jKey): {'present' if self.auth_token else 'missing'}"
             )
             self.logger.info(
                 "Note: The jKey must be the 'susertoken' obtained from Firstock's login API"
@@ -235,6 +267,12 @@ class FirstockWebSocket:
                 if self._shutdown_event.wait(self.retry_delay):
                     self.logger.info("Shutdown requested during retry wait; exiting supervisor")
                     break
+
+                # Re-read a fresh token from the DB before the next iteration
+                # rebuilds the connection URL. Firstock tokens roll over daily
+                # at ~3 AM IST; reusing the construction-time token reconnects
+                # with a dead jKey and the feed stays dead until a restart.
+                self._refresh_auth_token()
         finally:
             self.connection_state = self.DISCONNECTED
             self.logger.info("WebSocket supervisor exiting")
@@ -285,6 +323,9 @@ class FirstockWebSocket:
             ping_thread.join(timeout=2)
 
         self.connection_state = self.DISCONNECTED
+        with self._subscription_lock:
+            self.subscriptions.clear()
+            self._subscription_tokens.clear()
         self.logger.info("Firstock WebSocket connection closed")
 
     def subscribe(self, correlation_id, mode, token_list):
@@ -341,8 +382,11 @@ class FirstockWebSocket:
             # Send subscription
             wsapp.send(json.dumps(subscribe_msg))
 
-            # Track subscription
-            self.subscriptions.add(correlation_id)
+            # Keep batched correlation IDs tied to their wire instruments so
+            # token-level unsubscriptions can retire a batch when it empties.
+            with self._subscription_lock:
+                self.subscriptions.add(correlation_id)
+                self._subscription_tokens.setdefault(correlation_id, set()).update(tokens)
 
             self.logger.info(f"Subscribed to {correlation_id} with tokens: {tokens}")
 
@@ -389,8 +433,17 @@ class FirstockWebSocket:
             # Send unsubscription
             wsapp.send(json.dumps(unsubscribe_msg))
 
-            # Remove from tracking
-            self.subscriptions.discard(correlation_id)
+            # Remove these instruments from every batch that contains them.
+            # Adapter subscriptions are per symbol while wire sends are batched.
+            with self._subscription_lock:
+                removed_tokens = set(tokens)
+                for tracked_id, tracked_tokens in list(self._subscription_tokens.items()):
+                    tracked_tokens.difference_update(removed_tokens)
+                    if not tracked_tokens:
+                        self._subscription_tokens.pop(tracked_id, None)
+                        self.subscriptions.discard(tracked_id)
+                self._subscription_tokens.pop(correlation_id, None)
+                self.subscriptions.discard(correlation_id)
 
             self.logger.info(f"Unsubscribed from {correlation_id}")
 
@@ -463,7 +516,7 @@ class FirstockWebSocket:
                             self.logger.error(f"Full response: {data}")
                             self.logger.error(f"Using userId: {self.user_id}")
                             self.logger.error(
-                                f"Using jKey (first 10 chars): {self.auth_token[:10] if self.auth_token else 'None'}..."
+                                f"Using jKey: {'present' if self.auth_token else 'None'}"
                             )
                             self.logger.error(
                                 "IMPORTANT: The jKey must be the 'susertoken' from Firstock's login API response"
@@ -589,6 +642,9 @@ class FirstockWebSocket:
         """
         self.connection_state = self.DISCONNECTED
         self.authenticated = False  # Reset authentication status
+        with self._subscription_lock:
+            self.subscriptions.clear()
+            self._subscription_tokens.clear()
 
         # Signal the current monitor thread to exit. It may be mid-sleep;
         # Event.wait() returns immediately when set.
@@ -652,7 +708,8 @@ class FirstockWebSocket:
 
     def get_subscriptions(self):
         """Get list of active subscriptions"""
-        return list(self.subscriptions)
+        with self._subscription_lock:
+            return list(self.subscriptions)
 
     def _process_pending_subscriptions(self):
         """Process any subscriptions that were queued while waiting for authentication"""

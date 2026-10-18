@@ -6,10 +6,11 @@ from io import StringIO
 import httpx
 import numpy as np
 import pandas as pd
-from sqlalchemy import Column, Float, Index, Integer, Sequence, String, create_engine
+from sqlalchemy import Column, Float, Index, Integer, Sequence, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 
+from database.engine_factory import create_db_engine
 from extensions import socketio  # Import SocketIO
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
@@ -19,7 +20,7 @@ logger = get_logger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")  # Replace with your database path
 
-engine = create_engine(DATABASE_URL)
+engine = create_db_engine(DATABASE_URL)
 db_session = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
 Base = declarative_base()
 Base.query = db_session.query_property()
@@ -400,9 +401,25 @@ def download_groww_instrument_data(output_path):
     file_path = os.path.join(output_path, "master.csv")
     csv_url = "https://growwapi-assets.groww.in/instruments/instrument.csv"
 
-    # Expected headers - Updated to match actual CSV structure
-    headers_csv = "exchange,exchange_token,trading_symbol,groww_symbol,name,instrument_type,segment,series,isin,underlying_symbol,underlying_exchange_token,expiry_date,strike_price,lot_size,tick_size,freeze_quantity,is_reserved,buy_allowed,sell_allowed,internal_trading_symbol,is_intraday"
-    expected_headers = headers_csv.split(",")
+    # Columns that process_groww_data() reads BY NAME. We validate these are
+    # present rather than relabelling the file by position — Groww's CSV already
+    # ships a correct header, so keeping it makes us resilient to Groww adding or
+    # reordering columns (the old code hard-required an exact 21-column count and
+    # overwrote the header, which would silently mislabel or fail on any change).
+    required_columns = {
+        "exchange",
+        "exchange_token",
+        "trading_symbol",
+        "groww_symbol",
+        "name",
+        "instrument_type",
+        "segment",
+        "underlying_symbol",
+        "expiry_date",
+        "strike_price",
+        "lot_size",
+        "tick_size",
+    }
 
     try:
         # Get the shared httpx client with connection pooling
@@ -417,18 +434,18 @@ def download_groww_instrument_data(output_path):
         if len(lines) < 2 or "," not in content:
             raise ValueError("Downloaded content does not appear to be a valid CSV.")
 
-        # Verify column count matches and replace header line directly (no pandas parse needed)
-        original_headers = lines[0].strip().split(",")
-        if len(original_headers) == len(expected_headers):
-            new_content = ",".join(expected_headers) + "\n" + lines[1]
-        else:
+        # Validate the documented columns are present (by name), then keep
+        # Groww's own header as-is.
+        original_headers = [h.strip() for h in lines[0].strip().split(",")]
+        missing = required_columns - set(original_headers)
+        if missing:
             raise ValueError(
-                f"Downloaded CSV column count ({len(original_headers)}) does not match expected ({len(expected_headers)})."
+                f"Groww instrument CSV is missing expected columns: {sorted(missing)}"
             )
 
-        # Write directly to file
+        # Write directly to file, preserving Groww's header
         with open(file_path, "w", encoding="utf-8") as f:
-            f.write(new_content)
+            f.write(content)
         logger.info(f"Successfully saved instruments CSV to: {file_path}")
         return [file_path]
     except Exception as e:
@@ -544,7 +561,7 @@ def process_groww_data(path):
             "exchange_token": "token",  # Token ID
             "trading_symbol": "brsymbol",  # Broker-specific symbol
             "groww_symbol": "groww_symbol",  # Groww-specific symbol (keep for reference)
-            "name": "groww_symbol",  # Instrument name
+            "name": "name",  # Instrument name (company / index name for CASH rows)
             "instrument_type": "instrument_type",  # Instrument type from Groww
             "segment": "segment",  # Segment (CASH, FNO)
             "series": "series",  # Series (EQ, etc.)
@@ -621,7 +638,7 @@ def process_groww_data(path):
         # We want CE, PE, FUT values to be preserved as is
         instrument_type_map = {
             "EQ": "EQ",  # Equity
-            "IDX": "INDEX",  # Index
+            "IDX": "EQ",  # Index (identified by the *_INDEX exchange, not the type)
             "FUT": "FUT",  # Futures
             "CE": "CE",  # Call Options (keep original value)
             "PE": "PE",  # Put Options (keep original value)
@@ -682,15 +699,24 @@ def process_groww_data(path):
         df_mapped.loc[idx_bse_mask, "exchange"] = "BSE_INDEX"
 
         # Special handling for indices
-        # Make sure indices have instrumenttype=INDEX
+        # OpenAlgo has no INDEX instrumenttype: an index is an EQ row on
+        # NSE_INDEX/BSE_INDEX (same as Zerodha). The streaming code already
+        # detects indices from the exchange.
         index_mask = (df["instrument_type"] == "IDX") | (df["segment"] == "IDX")
-        df_mapped.loc[index_mask, "instrumenttype"] = "INDEX"
+        df_mapped.loc[index_mask, "instrumenttype"] = "EQ"
 
         # Format F&O symbols using vectorized operations (much faster than apply)
         # Identify FNO rows with valid expiry
+        # Groww's trading_symbol is not OpenAlgo format on BSE F&O
+        # (SENSEX26O2274900CE, SENSEX26OCTFUT) or NSE commodities (GOLD26NOVFUT),
+        # so those are rebuilt here too. MCX trading symbols already carry the
+        # full DDMMMYY expiry and are left as shipped.
         fno_data_mask = (
-            (df_mapped["brexchange"] == "NSE")
-            & (df["segment"] == "FNO")
+            (
+                ((df_mapped["brexchange"] == "NSE") & (df["segment"] == "FNO"))
+                | ((df_mapped["brexchange"] == "BSE") & (df["segment"] == "FNO"))
+                | ((df_mapped["brexchange"] == "NSE") & (df["segment"] == "COMMODITY"))
+            )
             & df_mapped["expiry"].notna()
             & (df_mapped["expiry"] != "")
         )
@@ -735,6 +761,43 @@ def process_groww_data(path):
                 df_mapped.loc[pe_mask, "symbol"] = (
                     base_symbol[pe_mask] + expiry_str[pe_mask] + strike_str[pe_mask] + "PE"
                 )
+
+        # Derivatives carry their underlying in `name`. The shared post-download
+        # pass derives it from the symbol, but only on F&O exchanges, so the NSE
+        # commodity rows (which stay on NSE) would otherwise be left blank.
+        deriv_mask = (
+            df_mapped["instrumenttype"].isin(["FUT", "CE", "PE"])
+            & df_mapped["underlying"].notna()
+            & (df_mapped["underlying"] != "")
+        )
+        df_mapped.loc[deriv_mask, "name"] = df_mapped.loc[deriv_mask, "underlying"]
+
+        # Disambiguate CASH rows that share a trading_symbol on the same exchange.
+        # Groww drops the series from trading_symbol, so NSE bonds listed under one
+        # symbol with several series (e.g. IMC1 N1/N2/N3) collapse into duplicate
+        # (symbol, exchange) pairs and lookups pick one arbitrarily. Give only those
+        # rows the SYMBOL-SERIES form (Groww's internal_trading_symbol, e.g. IMC1-N2).
+        cash_rows = df["segment"] == "CASH"
+        dup_mask = cash_rows & df_mapped[cash_rows].duplicated(
+            subset=["symbol", "exchange"], keep=False
+        ).reindex(df_mapped.index, fill_value=False)
+        if dup_mask.any():
+            # SYMBOL-SERIES only where Groww gave a series; without one the
+            # symbol stays as it is rather than becoming "SYMBOL-"
+            series = df["series"].fillna("").astype(str).str.strip()
+            series_symbol = df_mapped["symbol"].where(
+                series == "", df_mapped["symbol"] + "-" + series
+            )
+            if "internal_trading_symbol" in df.columns:
+                series_symbol = df["internal_trading_symbol"].where(
+                    df["internal_trading_symbol"].notna() & (df["internal_trading_symbol"] != ""),
+                    series_symbol,
+                )
+            df_mapped.loc[dup_mask, "symbol"] = series_symbol[dup_mask]
+            logger.info(
+                f"Disambiguated {int(dup_mask.sum())} CASH rows sharing a trading_symbol: "
+                f"{sorted(df_mapped.loc[dup_mask, 'symbol'].tolist())}"
+            )
 
         logger.info(f"Processed {len(df_mapped)} instruments")
         return df_mapped
@@ -823,6 +886,26 @@ def master_contract_download():
         )
         if nfo_space_mask.any():
             token_df.loc[nfo_space_mask, "symbol"] = token_df.loc[nfo_space_mask, "brsymbol"].str.replace(" ", "", regex=False)
+
+        # Step 5b: Enforce the NOT NULL symbol/brsymbol invariant before insert.
+        # Groww's CSV occasionally ships a row with a blank trading_symbol (e.g.
+        # a stray BSE index entry), which feeds both `symbol` and `brsymbol`.
+        # pandas leaves it as NaN and the bulk insert then fails with
+        # "NOT NULL constraint failed: symtoken.symbol", which rolls back the
+        # WHOLE download and leaves the master contract empty. Normalise NaN to
+        # "", fall back brsymbol -> symbol when only brsymbol is missing, and
+        # drop any row that still has no usable symbol.
+        before = len(token_df)
+        token_df["symbol"] = token_df["symbol"].fillna("").astype(str).str.strip()
+        token_df["brsymbol"] = token_df["brsymbol"].fillna("").astype(str).str.strip()
+        br_missing = (token_df["brsymbol"] == "") & (token_df["symbol"] != "")
+        token_df.loc[br_missing, "brsymbol"] = token_df.loc[br_missing, "symbol"]
+        token_df = token_df[token_df["symbol"] != ""].copy()
+        dropped = before - len(token_df)
+        if dropped:
+            logger.warning(
+                f"Dropped {dropped} Groww instrument row(s) with empty symbol before insert"
+            )
 
         # Step 6: Insert into database
         logger.info(f"Inserting {len(token_df)} records into database")

@@ -2,9 +2,9 @@
 
 ## Introduction
 
-OpenAlgo ships with a complete suite of **twelve built-in analytical tools** for options trading and market analysis. They all live under the `/tools` page in the sidebar and stream live data from your connected broker via the unified WebSocket feed — no external subscriptions, no third-party data vendors.
+OpenAlgo ships with **thirteen built-in analytical tools** for options trading and market analysis. They live under the `/tools` page and use the active broker's REST and WebSocket market data where each tool requires it.
 
-All tools work identically across every supported broker. Switch brokers and the same tools keep working without any configuration change.
+Availability depends on the plugin's supported exchanges, broker response fields, account market-data entitlement, and the symbols or expiries requested. A plugin being installed does not guarantee that every analytical page has the data it needs.
 
 ## Accessing the Tools Page
 
@@ -40,7 +40,7 @@ Real-time option chain with full order capability.
 - Live Greeks per strike (Delta, Gamma, Theta, Vega, IV)
 - OI, OI change, Volume, LTP, bid/ask — all streaming
 - Quick order placement inline from the chain (click-to-trade)
-- Supports weekly and monthly expiries across all index and stock options
+- Supports the option expiries returned for the selected underlying and broker
 
 ### 4. Option Greeks (`/ivchart`)
 
@@ -102,7 +102,19 @@ Gamma Exposure (GEX) analysis for market-maker positioning.
 - **Top Gamma Strikes** ranking
 - Useful for identifying expected support/resistance zones
 
-### 11. IV Smile (`/ivsmile`)
+### 11. Strike Profile (`/strikeprofile`)
+
+Gamma exposure (GEX) and delta exposure (DEX) for every strike of several expiries at once, as a strike by expiry heatmap.
+
+- Values are in rupees crore. **GEX** is what hedgers would trade for a 1% move in the underlying (calls positive, puts negative). **DEX** is the delta-weighted open interest (call delta x OI + put delta x OI, times spot).
+- One column per expiry, labelled with days to expiry, so a near expiry and a far one sit side by side.
+- **Peaks** marks each expiry's own largest positive and negative strike (All), only the larger of the two (Max), or none (Off). A near expiry always carries far more gamma than a far one, so the peaks are what make a level on a far expiry visible.
+- **Shade** colours cells against the whole grid (Global) or against each expiry's own largest value (Per expiry).
+- **Flip** is the underlying price at which total GEX across the selected expiries changes sign, found by re-pricing every option's gamma at nearby prices. **C wall** and **P wall** are the strikes with the most call and put GEX.
+- Range buttons (2%, 5%, 10%, All) choose the strikes shown around spot; Chart shows the net per strike summed across expiries; two panes show GEX and DEX together.
+- Each selected expiry is one option chain request, so the nearest six are selected by default. Select more from the expiry list when your broker answers quickly.
+
+### 12. IV Smile (`/ivsmile`)
 
 Implied Volatility smile curve with skew analysis.
 
@@ -111,7 +123,7 @@ Implied Volatility smile curve with skew analysis.
 - Skew measurement between OTM puts and OTM calls
 - Per-expiry toggle
 
-### 12. OI Profile (`/oiprofile`)
+### 13. OI Profile (`/oiprofile`)
 
 Futures candlestick with OI profile overlay.
 

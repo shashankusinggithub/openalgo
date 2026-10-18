@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronsUpDown } from 'lucide-react'
 import type * as PlotlyTypes from 'plotly.js'
-import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
-import { useThemeStore } from '@/stores/themeStore'
-import { oiTrackerApi, type MaxPainResponse } from '@/api/oi-tracker'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type MaxPainResponse, oiTrackerApi } from '@/api/oi-tracker'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
   Command,
@@ -21,10 +21,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import { showToast } from '@/utils/toast'
+import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import Plot from '@/lib/Plot2D'
+import { serverSentence } from '@/lib/serverSentence'
+import { useThemeStore } from '@/stores/themeStore'
+import { showToast } from '@/utils/toast'
 
 // FNO_EXCHANGES and DEFAULT_UNDERLYINGS are now provided by useSupportedExchanges() hook
 
@@ -39,14 +40,18 @@ function convertExpiryForAPI(expiry: string): string {
 
 export default function MaxPain() {
   const { mode, appMode } = useThemeStore()
-  const { fnoExchanges, defaultFnoExchange, defaultUnderlyings } = useSupportedExchanges()
+  const { toolsFnoExchanges, defaultToolsFnoExchange, defaultUnderlyings } = useSupportedExchanges()
   const isAnalyzer = appMode === 'analyzer'
   const isDark = mode === 'dark' || isAnalyzer
 
-  const [selectedExchange, setSelectedExchange] = useState(defaultFnoExchange)
-  const [underlyings, setUnderlyings] = useState<string[]>(defaultUnderlyings[defaultFnoExchange] || [])
+  const [selectedExchange, setSelectedExchange] = useState(defaultToolsFnoExchange)
+  const [underlyings, setUnderlyings] = useState<string[]>(
+    defaultUnderlyings[defaultToolsFnoExchange] || []
+  )
   const [underlyingOpen, setUnderlyingOpen] = useState(false)
-  const [selectedUnderlying, setSelectedUnderlying] = useState(defaultUnderlyings[defaultFnoExchange]?.[0] || '')
+  const [selectedUnderlying, setSelectedUnderlying] = useState(
+    defaultUnderlyings[defaultToolsFnoExchange]?.[0] || ''
+  )
   const [expiries, setExpiries] = useState<string[]>([])
   const [selectedExpiry, setSelectedExpiry] = useState('')
   const [maxPainData, setMaxPainData] = useState<MaxPainResponse | null>(null)
@@ -56,9 +61,9 @@ export default function MaxPain() {
   // Re-sync exchange when broker capabilities load asynchronously
   useEffect(() => {
     setSelectedExchange((prev) =>
-      prev && fnoExchanges.some((ex) => ex.value === prev) ? prev : defaultFnoExchange
+      prev && toolsFnoExchanges.some((ex) => ex.value === prev) ? prev : defaultToolsFnoExchange
     )
-  }, [defaultFnoExchange, fnoExchanges])
+  }, [defaultToolsFnoExchange, toolsFnoExchanges])
 
   // Fetch underlyings when exchange changes
   useEffect(() => {
@@ -85,8 +90,10 @@ export default function MaxPain() {
       }
     }
     fetchUnderlyings()
-    return () => { cancelled = true }
-  }, [selectedExchange])
+    return () => {
+      cancelled = true
+    }
+  }, [selectedExchange, defaultUnderlyings])
 
   // Fetch expiries when underlying changes
   useEffect(() => {
@@ -114,9 +121,10 @@ export default function MaxPain() {
       }
     }
     fetchExpiries()
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedUnderlying])
+    return () => {
+      cancelled = true
+    }
+  }, [selectedUnderlying, selectedExchange])
 
   // Fetch max pain data - uses requestIdRef to discard stale responses
   const fetchMaxPain = useCallback(async () => {
@@ -136,21 +144,21 @@ export default function MaxPain() {
       } else {
         showToast.error(response.message || 'Failed to calculate Max Pain')
       }
-    } catch {
+    } catch (error) {
       if (requestIdRef.current !== requestId) return
-      showToast.error('Failed to calculate Max Pain')
+      showToast.error(serverSentence(error, 'Failed to calculate Max Pain'))
     } finally {
       if (requestIdRef.current === requestId) setIsLoading(false)
     }
   }, [selectedUnderlying, selectedExpiry, selectedExchange])
 
+  // Only trigger on expiry change - not on fetchMaxPain identity change,
+  // which would cause a stale request with mixed params during exchange switch.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: must fire only on selectedExpiry change; including fetchMaxPain would re-run with mixed exchange/underlying params during an exchange switch and fire a stale Max Pain request
   useEffect(() => {
     if (selectedExpiry) {
       fetchMaxPain()
     }
-    // Only trigger on expiry change - not on fetchMaxPain identity change,
-    // which would cause a stale request with mixed params during exchange switch.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedExpiry])
 
   // Theme colors
@@ -167,17 +175,9 @@ export default function MaxPain() {
       barColor: isAnalyzer ? '#8b5cf6' : '#7c3aed',
       maxPainBar: isAnalyzer ? '#c084fc' : '#a78bfa',
       markerLine: isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.5)',
-      hoverBg: isDark
-        ? isAnalyzer
-          ? '#2d2545'
-          : '#1e293b'
-        : '#ffffff',
+      hoverBg: isDark ? (isAnalyzer ? '#2d2545' : '#1e293b') : '#ffffff',
       hoverFont: isDark ? '#e0e0e0' : '#333333',
-      hoverBorder: isDark
-        ? isAnalyzer
-          ? '#7c3aed'
-          : '#475569'
-        : '#e2e8f0',
+      hoverBorder: isDark ? (isAnalyzer ? '#7c3aed' : '#475569') : '#e2e8f0',
     }),
     [isDark, isAnalyzer]
   )
@@ -320,7 +320,7 @@ export default function MaxPain() {
               <SelectValue placeholder="Exchange" />
             </SelectTrigger>
             <SelectContent>
-              {fnoExchanges.map((ex) => (
+              {toolsFnoExchanges.map((ex) => (
                 <SelectItem key={ex.value} value={ex.value}>
                   {ex.label}
                 </SelectItem>
@@ -331,7 +331,12 @@ export default function MaxPain() {
           {/* Underlying selector */}
           <Popover open={underlyingOpen} onOpenChange={setUnderlyingOpen}>
             <PopoverTrigger asChild>
-              <Button variant="outline" role="combobox" aria-expanded={underlyingOpen} className="w-[160px] justify-between">
+              <Button
+                variant="outline"
+                role="combobox"
+                aria-expanded={underlyingOpen}
+                className="w-[160px] justify-between"
+              >
                 {selectedUnderlying || 'Underlying'}
                 <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
               </Button>
@@ -351,7 +356,9 @@ export default function MaxPain() {
                           setUnderlyingOpen(false)
                         }}
                       >
-                        <Check className={`mr-2 h-4 w-4 ${selectedUnderlying === u ? 'opacity-100' : 'opacity-0'}`} />
+                        <Check
+                          className={`mr-2 h-4 w-4 ${selectedUnderlying === u ? 'opacity-100' : 'opacity-0'}`}
+                        />
                         {u}
                       </CommandItem>
                     ))}

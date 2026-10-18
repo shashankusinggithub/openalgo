@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   ArrowUpDown,
+  ChartCandlestick,
   ChevronDown,
   ChevronRight,
   Download,
@@ -14,9 +15,8 @@ import {
   X,
 } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useOrderEventRefresh } from '@/hooks/useOrderEventRefresh'
-import { showToast } from '@/utils/toast'
 import { tradingApi } from '@/api/trading'
+import { ChartSymbolLink } from '@/components/trading/ChartSymbolLink'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   AlertDialog,
@@ -41,6 +41,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import { EmptyState } from '@/components/ui/empty-state'
 import { Label } from '@/components/ui/label'
 import {
   Table,
@@ -52,12 +53,14 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useLivePrice } from '@/hooks/useLivePrice'
+import { useOrderEventRefresh } from '@/hooks/useOrderEventRefresh'
 import { usePageVisibility } from '@/hooks/usePageVisibility'
+import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import { cn, makeFormatCurrency, sanitizeCSV } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
-import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import { onModeChange } from '@/stores/themeStore'
 import type { Position } from '@/types/trading'
+import { showToast } from '@/utils/toast'
 
 const STORAGE_KEY = 'openalgo_positions_prefs'
 
@@ -170,7 +173,11 @@ export default function Positions() {
 
   // Centralized real-time price hook with WebSocket + MultiQuotes fallback
   // Automatically pauses when tab is hidden
-  const { data: enhancedPositions, isLive, isPaused } = useLivePrice(positions, {
+  const {
+    data: enhancedPositions,
+    isLive,
+    isPaused,
+  } = useLivePrice(positions, {
     enabled: positions.length > 0,
     useMultiQuotesFallback: true,
     staleThreshold: 5000,
@@ -192,8 +199,7 @@ export default function Positions() {
             exchange: prefs.filters.exchange || [],
           })
       }
-    } catch (e) {
-    }
+    } catch (_e) {}
   }, [])
 
   // Save preferences to localStorage
@@ -443,15 +449,12 @@ export default function Positions() {
         position.product
       )
       if (response.status === 'success') {
-        showToast.success(
-          response.message || `Position closed for ${position.symbol}`,
-          'positions'
-        )
+        showToast.success(response.message || `Position closed for ${position.symbol}`, 'positions')
         fetchPositions(true)
       } else {
         showToast.error(response.message || 'Failed to close position', 'positions')
       }
-    } catch (err) {
+    } catch (_err) {
       showToast.error('Failed to close position', 'positions')
     }
   }
@@ -465,7 +468,7 @@ export default function Positions() {
       } else {
         showToast.error(response.message || 'Failed to close all positions', 'positions')
       }
-    } catch (err) {
+    } catch (_err) {
       showToast.error('Failed to close all positions', 'positions')
     }
   }
@@ -688,16 +691,16 @@ export default function Positions() {
 
                 {/* Product Type */}
                 {!isCrypto && (
-                <div className="space-y-3">
-                  <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Product Type
-                  </Label>
-                  <div className="flex flex-wrap gap-2">
-                    <FilterChip type="product" value="CNC" label="CNC" />
-                    <FilterChip type="product" value="MIS" label="MIS" />
-                    <FilterChip type="product" value="NRML" label="NRML" />
+                  <div className="space-y-3">
+                    <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      Product Type
+                    </Label>
+                    <div className="flex flex-wrap gap-2">
+                      <FilterChip type="product" value="CNC" label="CNC" />
+                      <FilterChip type="product" value="MIS" label="MIS" />
+                      <FilterChip type="product" value="NRML" label="NRML" />
+                    </div>
                   </div>
-                </div>
                 )}
 
                 {/* Direction */}
@@ -784,15 +787,16 @@ export default function Positions() {
               Grouped: {grouping === 'underlying' ? 'Underlying' : 'Underlying & Expiry'}
             </Badge>
           )}
-          {!isCrypto && filters.product.map((v) => (
-            <Badge
-              key={v}
-              variant="secondary"
-              className="bg-pink-500/10 text-pink-600 border-pink-500/30"
-            >
-              {v}
-            </Badge>
-          ))}
+          {!isCrypto &&
+            filters.product.map((v) => (
+              <Badge
+                key={v}
+                variant="secondary"
+                className="bg-pink-500/10 text-pink-600 border-pink-500/30"
+              >
+                {v}
+              </Badge>
+            ))}
           {filters.direction.map((v) => (
             <Badge
               key={v}
@@ -867,14 +871,18 @@ export default function Positions() {
           ) : error ? (
             <div className="text-center py-12 text-muted-foreground">{error}</div>
           ) : filteredPositions.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">
-              <p className="mb-4">No positions match your filters</p>
-              {hasActiveFilters && (
-                <Button variant="ghost" size="sm" onClick={clearFilters}>
-                  Clear Filters
-                </Button>
-              )}
-            </div>
+            <EmptyState
+              icon={ChartCandlestick}
+              title="No positions match your filters"
+              description="Try adjusting or clearing your filters to see results."
+              action={
+                hasActiveFilters ? (
+                  <Button variant="ghost" size="sm" onClick={clearFilters}>
+                    Clear Filters
+                  </Button>
+                ) : undefined
+              }
+            />
           ) : (
             <div className="overflow-x-auto">
               <Table>
@@ -942,82 +950,110 @@ export default function Positions() {
 
                         {/* Position Rows */}
                         {!isCollapsed &&
-                          groupPositions.map((position, index) => (
-                            <TableRow key={`${position.symbol}-${position.exchange}-${index}`}>
-                              <TableCell className="w-[140px] font-medium">
-                                {position.symbol}
-                              </TableCell>
-                              <TableCell className="w-[80px]">
-                                <Badge
-                                  variant="outline"
-                                  className={EXCHANGE_COLORS[position.exchange] || ''}
-                                >
-                                  {position.exchange}
-                                </Badge>
-                              </TableCell>
-                              {!isCrypto && (
-                              <TableCell className="w-[80px]">
-                                <Badge
-                                  variant="outline"
-                                  className={PRODUCT_COLORS[position.product] || ''}
-                                >
-                                  {position.product}
-                                </Badge>
-                              </TableCell>
-                              )}
-                              <TableCell
-                                className={cn(
-                                  'w-[80px] text-right font-medium',
-                                  position.quantity > 0 ? 'text-green-600' : 'text-red-600'
+                          groupPositions.map((position, index) => {
+                            // A broker keeps reporting a position it has
+                            // squared off, with quantity 0 and its realised
+                            // P&L. Those rows stay - the figure is the point -
+                            // but there is nothing left to close on them.
+                            //
+                            // Coerced, not compared directly: the quantity is
+                            // typed as a number but does not always arrive as
+                            // one. Zerodha's position mapping defaults it to
+                            // the string "0", and a strict `!== 0` reads that
+                            // as an open position, which is the exact row this
+                            // guard exists to catch. calculatePnlPercent above
+                            // coerces for the same reason.
+                            const quantity = Number(position.quantity) || 0
+                            const isOpen = quantity !== 0
+
+                            return (
+                              <TableRow key={`${position.symbol}-${position.exchange}-${index}`}>
+                                <TableCell className="w-[140px] font-medium">
+                                  <ChartSymbolLink
+                                    symbol={position.symbol}
+                                    exchange={position.exchange}
+                                  />
+                                </TableCell>
+                                <TableCell className="w-[80px]">
+                                  <Badge
+                                    variant="outline"
+                                    className={EXCHANGE_COLORS[position.exchange] || ''}
+                                  >
+                                    {position.exchange}
+                                  </Badge>
+                                </TableCell>
+                                {!isCrypto && (
+                                  <TableCell className="w-[80px]">
+                                    <Badge
+                                      variant="outline"
+                                      className={PRODUCT_COLORS[position.product] || ''}
+                                    >
+                                      {position.product}
+                                    </Badge>
+                                  </TableCell>
                                 )}
-                              >
-                                {position.quantity}
-                              </TableCell>
-                              <TableCell className="w-[120px] text-right font-mono">
-                                {formatCurrency(position.average_price)}
-                              </TableCell>
-                              <TableCell className="w-[120px] text-right font-mono">
-                                {position.ltp !== undefined ? formatCurrency(position.ltp) : '-'}
-                              </TableCell>
-                              <TableCell
-                                className={cn(
-                                  'w-[120px] text-right font-medium',
-                                  isProfit(position.pnl) ? 'text-green-600' : 'text-red-600'
-                                )}
-                              >
-                                <div className="flex items-center justify-end gap-1">
-                                  {isProfit(position.pnl) ? (
-                                    <TrendingUp className="h-4 w-4" />
-                                  ) : (
-                                    <TrendingDown className="h-4 w-4" />
+                                <TableCell
+                                  className={cn(
+                                    'w-[80px] text-right font-medium',
+                                    // A squared-off position is neither long nor
+                                    // short. Colouring its 0 red read as a short.
+                                    !isOpen
+                                      ? 'text-muted-foreground'
+                                      : quantity > 0
+                                        ? 'text-green-600'
+                                        : 'text-red-600'
                                   )}
-                                  {formatCurrency(position.pnl)}
-                                </div>
-                              </TableCell>
-                              <TableCell
-                                className={cn(
-                                  'w-[100px] text-right',
-                                  isProfit(calculatePnlPercent(position))
-                                    ? 'text-green-600'
-                                    : 'text-red-600'
-                                )}
-                              >
-                                {calculatePnlPercent(position) >= 0 ? '+' : ''}
-                                {calculatePnlPercent(position).toFixed(2)}%
-                              </TableCell>
-                              <TableCell className="w-[60px] text-right">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                                  onClick={() => handleClosePosition(position)}
-                                  aria-label={`Close ${position.symbol} position`}
                                 >
-                                  <X className="h-4 w-4" />
-                                </Button>
-                              </TableCell>
-                            </TableRow>
-                          ))}
+                                  {position.quantity}
+                                </TableCell>
+                                <TableCell className="w-[120px] text-right font-mono">
+                                  {formatCurrency(position.average_price)}
+                                </TableCell>
+                                <TableCell className="w-[120px] text-right font-mono">
+                                  {position.ltp !== undefined ? formatCurrency(position.ltp) : '-'}
+                                </TableCell>
+                                <TableCell
+                                  className={cn(
+                                    'w-[120px] text-right font-medium',
+                                    isProfit(position.pnl) ? 'text-green-600' : 'text-red-600'
+                                  )}
+                                >
+                                  <div className="flex items-center justify-end gap-1">
+                                    {isProfit(position.pnl) ? (
+                                      <TrendingUp className="h-4 w-4" />
+                                    ) : (
+                                      <TrendingDown className="h-4 w-4" />
+                                    )}
+                                    {formatCurrency(position.pnl)}
+                                  </div>
+                                </TableCell>
+                                <TableCell
+                                  className={cn(
+                                    'w-[100px] text-right',
+                                    isProfit(calculatePnlPercent(position))
+                                      ? 'text-green-600'
+                                      : 'text-red-600'
+                                  )}
+                                >
+                                  {calculatePnlPercent(position) >= 0 ? '+' : ''}
+                                  {calculatePnlPercent(position).toFixed(2)}%
+                                </TableCell>
+                                <TableCell className="w-[60px] text-right">
+                                  {isOpen && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                                      onClick={() => handleClosePosition(position)}
+                                      aria-label={`Close ${position.symbol} position`}
+                                    >
+                                      <X className="h-4 w-4" />
+                                    </Button>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            )
+                          })}
                       </React.Fragment>
                     )
                   })}

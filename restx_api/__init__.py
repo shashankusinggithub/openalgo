@@ -46,15 +46,19 @@ from .place_gtt_order import api as place_gtt_order_ns
 from .place_order import api as place_order_ns
 from .place_smart_order import api as place_smart_order_ns
 from .pnl_symbols import api as pnl_symbols_ns
+from .portfolio import api as portfolio_ns
+from .sip import api as sip_ns
 from .positionbook import api as positionbook_ns
 from .quotes import api as quotes_ns
 from .search import api as search_ns
 from .split_order import api as split_order_ns
+from .strategy import api as strategy_ns
 from .symbol import api as symbol_ns
 from .synthetic_future import api as synthetic_future_ns
 from .telegram_bot import api as telegram_ns
 from .ticker import api as ticker_ns
 from .tradebook import api as tradebook_ns
+from .whatsapp_bot import api as whatsapp_ns
 
 # Add namespaces
 api.add_namespace(place_order_ns, path="/placeorder")
@@ -66,6 +70,8 @@ api.add_namespace(cancel_all_order_ns, path="/cancelallorder")
 api.add_namespace(quotes_ns, path="/quotes")
 api.add_namespace(multiquotes_ns, path="/multiquotes")
 api.add_namespace(history_ns, path="/history")
+api.add_namespace(portfolio_ns, path="/portfolio")
+api.add_namespace(sip_ns, path="/sip")
 api.add_namespace(depth_ns, path="/depth")
 api.add_namespace(option_chain_ns, path="/optionchain")
 api.add_namespace(intervals_ns, path="/intervals")
@@ -91,6 +97,7 @@ api.add_namespace(synthetic_future_ns, path="/syntheticfuture")
 api.add_namespace(analyzer_ns, path="/analyzer")
 api.add_namespace(ping_ns, path="/ping")
 api.add_namespace(telegram_ns, path="/telegram")
+api.add_namespace(whatsapp_ns, path="/whatsapp")
 api.add_namespace(margin_ns, path="/margin")
 api.add_namespace(instruments_ns, path="/instruments")
 api.add_namespace(chart_ns, path="/chart")
@@ -101,3 +108,4 @@ api.add_namespace(place_gtt_order_ns, path="/placegttorder")
 api.add_namespace(modify_gtt_order_ns, path="/modifygttorder")
 api.add_namespace(cancel_gtt_order_ns, path="/cancelgttorder")
 api.add_namespace(gtt_orderbook_ns, path="/gttorderbook")
+api.add_namespace(strategy_ns, path="/strategy")
